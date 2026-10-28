@@ -37,7 +37,7 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
     run: (env, p) => data.listChannels(env, p.userId),
   }),
   get_channel: tool({
-    description: "A channel's members, connected Claude sessions (who is online, and the subagents each runs, addressable as <session>/<agent>), and invites (owner only).",
+    description: "A channel's members, connected Claude sessions (and who is online), and invites (owner only).",
     input: z.object({ channel: CHANNEL }),
     readOnly: true,
     run: (env, p, a) => data.channelDetail(env, p.userId, a.channel),
@@ -135,7 +135,7 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
     input: z.object({
       channel: CHANNEL,
       text: z.string(),
-      to: z.string().optional().describe("An address in the channel: '<session>' for a session's main conversation or '<session>/<agent>' for one of its subagents; omit for everyone"),
+      to: z.string().optional().describe("A connected session's name, or a member's GitHub login to reach all their sessions; omit for everyone"),
     }),
     run: (env, p, a) => data.postMessage(env, p.userId, a.channel, a.text, a.to),
   }),

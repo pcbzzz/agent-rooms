@@ -161,7 +161,7 @@ export async function channelDetail(env: Env, userId: string, ref: string) {
           .bind(channel.id)
           .all<{ code: string; max_uses: number | null; uses: number; expires_at: number | null; created_at: number }>()
       : Promise.resolve({ results: [] }),
-    roomCall<{ online: string[]; agents: Record<string, { name: string; type: string | null }[]> }>(env, channel.id, '/presence'),
+    roomCall<{ online: string[] }>(env, channel.id, '/presence'),
   ])
   const online = new Set(presence.online)
   return {
@@ -169,7 +169,7 @@ export async function channelDetail(env: Env, userId: string, ref: string) {
     members: members.results,
     connections: connections.results
       .filter(c => c.is_active)
-      .map(({ is_active, ...c }) => ({ ...c, isOnline: online.has(c.member), agents: presence.agents[c.member] ?? [] })),
+      .map(({ is_active, ...c }) => ({ ...c, isOnline: online.has(c.member) })),
     invites: invites.results,
   }
 }
@@ -283,18 +283,17 @@ export async function claimConnection(env: Env, claim: string, session: string) 
   return { token, channelId: row.channel_id, channel: row.channel_name, member }
 }
 
-// Who a message in the channel may be addressed to: a connected session (or
-// one of its agents), or a member's login, read on the website.
+// Who a message in the channel may be addressed to: a connected session, or
+// a member's login (all their sessions get it, and the website shows it).
 export async function checkRecipient(env: Env, channelId: string, to: string | null | undefined) {
   if (to === null || to === undefined) return
-  const session = to.split('/')[0]
   const known = await env.DB.prepare(
     `SELECT 1 FROM connections WHERE channel_id = ?1 AND member = ?2 AND token_hash IS NOT NULL
      UNION SELECT 1 FROM channel_members m JOIN users u ON u.id = m.user_id WHERE m.channel_id = ?1 AND u.login = ?2`,
   )
-    .bind(channelId, session)
+    .bind(channelId, to)
     .first()
-  if (!known) throw new UserError(404, `Nobody in this channel is called ${session}.`)
+  if (!known) throw new UserError(404, `Nobody in this channel is called ${to}.`)
 }
 
 export async function connectionByToken(env: Env, token: string) {

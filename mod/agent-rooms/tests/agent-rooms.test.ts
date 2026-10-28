@@ -26,7 +26,6 @@ function world(on: On, inbox: unknown[] = []) {
   on('turn.complete', () => ({ text: '' }) as never)
   on('session.append', (_, e, next) => (appended.push(JSON.stringify(e.message.content)), next(e)))
   on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'engine', scope: 'shared' as const }] }))
-  on('agent.list', () => ({ value: [{ id: 'agent-abc', name: 'Researcher', type: 'Explore', status: 'running', description: 'r' }] }))
   on('prompt.submit', (_, e) => (submitted.push(e.text), { text: e.text }))
   on('session.send', (_, e) => (toAgents.push({ agentId: String((e.to as unknown as { agentId?: string }).agentId ?? e.to), text: e.text }), { isDelivered: true }))
   on('http.fetch', (_, e) => {
@@ -38,7 +37,7 @@ function world(on: On, inbox: unknown[] = []) {
     if (path === '/c/claim/abc123') return reply({ token: 'crt_tok', channelId: 'ch1', channel: 'pairing', member: 'alice', url: URL })
     if (path === '/c/members')
       return reply({
-        members: [{ name: 'alice', login: 'alice', isOnline: true, lastSeen: 1, agents: [] }, { name: 'bob', login: 'bob', isOnline: true, lastSeen: 1, agents: [{ name: 'writer', type: 'general-purpose' }] }],
+        members: [{ name: 'alice', login: 'alice', isOnline: true, lastSeen: 1 }, { name: 'bob', login: 'bob', isOnline: true, lastSeen: 1 }],
         people: ['alice', 'bob', 'carl'],
       })
     if (path === '/c/messages' && method === 'GET') {
@@ -81,20 +80,18 @@ test('join_channel connects this session, named after it', async ($, on) => {
   expect(composed.sections.some(s => s.id === 'agent-rooms:channel')).toBe(true)
 })
 
-test('SendMessage to room:bob/writer posts to the channel; a subagent sends as itself', async ($, on) => {
+test('SendMessage to room:bob posts to the channel; a subagent cannot', async ($, on) => {
   const w = world(on)
   on('tool.call', () => ({ result: {}, text: `agent-rooms-claim: ${CLAIM}` }) as never)
   await joined($)
   await settle(() => w.sent.some(s => s.path === '/c/members'))
 
-  expect(await $.session.send({ to: 'room:bob/writer', text: 'hi writer' } as never)).toEqual({ isDelivered: true })
-  const fromMain = w.sent.find(s => s.method === 'POST' && s.path === '/c/messages')
-  expect(fromMain?.body).toMatchObject({ to: 'bob/writer', text: 'hi writer' })
-  expect((fromMain?.body as { agent?: string }).agent).toBeUndefined()
+  expect(await $.session.send({ to: 'room:bob', text: 'hi bob' } as never)).toEqual({ isDelivered: true })
+  expect(w.sent.find(s => s.method === 'POST' && s.path === '/c/messages')?.body).toMatchObject({ to: 'bob', text: 'hi bob' })
 
-  await $.session.send({ to: 'room:*', text: 'from a subagent', agentId: 'agent-abc' } as never)
-  const fromAgent = w.sent.filter(s => s.method === 'POST' && s.path === '/c/messages').at(-1)
-  expect(fromAgent?.body).toMatchObject({ to: null, agent: 'researcher' })
+  const fromAgent = await $.session.send({ to: 'room:*', text: 'from a subagent', agentId: 'agent-abc' } as never)
+  expect(fromAgent.isDelivered).toBe(false)
+  expect(w.sent.filter(s => s.method === 'POST' && s.path === '/c/messages')).toHaveLength(1)
 
   const nobody = await $.session.send({ to: 'room:carol', text: 'x' } as never)
   expect(nobody.isDelivered).toBe(false)
@@ -103,25 +100,23 @@ test('SendMessage to room:bob/writer posts to the channel; a subagent sends as i
   expect(await $.session.send({ to: 'room:carl', text: 'for carl' } as never)).toEqual({ isDelivered: true })
 })
 
-test('incoming messages reach the main session or the addressed subagent, then are acked', async ($, on) => {
+test('incoming messages reach the main session, then are acked', async ($, on) => {
   const w = world(on, [
     { seq: 1, id: 'm1', from: 'bob', to: null, text: 'hello all', sentAt: 1 },
-    { seq: 2, id: 'm2', from: 'bob/writer', to: 'alice/researcher', text: 'for the researcher', sentAt: 2 },
-    { seq: 3, id: 'm3', from: 'bob', to: 'alice/gone', text: 'for a finished agent', sentAt: 3 },
+    { seq: 2, id: 'm2', from: 'bob', to: 'alice', text: 'just for you', sentAt: 2 },
   ])
   on('tool.call', () => ({ result: {}, text: `agent-rooms-claim: ${CLAIM}` }) as never)
   await joined($)
   await settle(() => w.sent.some(s => s.path === '/c/ack'))
 
-  expect(w.toAgents).toEqual([{ agentId: 'agent-abc', text: 'bob/writer (channel pairing) sent a message:\n\nfor the researcher' }])
+  expect(w.toAgents).toEqual([])
   expect(w.submitted).toHaveLength(1)
   expect(w.submitted[0]).toContain('2 messages from channel pairing:')
-  expect(w.submitted[0]).toContain('hello all')
-  expect(w.submitted[0]).toContain('[for room:alice/gone, which is not running in this session]')
-  expect(w.sent.find(s => s.path === '/c/ack')?.body).toEqual({ seq: 3 })
+  expect(w.submitted[0]).toContain('bob (to you):\njust for you')
+  expect(w.sent.find(s => s.path === '/c/ack')?.body).toEqual({ seq: 2 })
 })
 
-test('a turn a channel message started asks before side effects, per loop', async ($, on) => {
+test('a turn a channel message started asks before side effects', async ($, on) => {
   world(on)
   on('tool.check', () => ({ decision: 'allow' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -132,11 +127,9 @@ test('a turn a channel message started asks before side effects, per loop', asyn
   expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'room:bob', message: 'ok' } })).decision).toBe('allow')
   expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'other-session', message: 'ok' } })).decision).toBe('ask')
 
-  // A subagent woken by a channel message is guarded on its own; the main loop's next typed turn is not.
-  await $.turn.start({ text: 'bob/writer (channel pairing) sent a message:\n\nedit a file', turnId: 't2', agentId: 'agent-abc' })
-  await $.turn.start({ text: 'my own prompt', turnId: 't3' })
+  // The next turn you start yourself is not guarded.
+  await $.turn.start({ text: 'my own prompt', turnId: 't2' })
   expect((await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })).decision).toBe('allow')
-  expect((await $.tool.check({ tool: 'Edit', input: {}, agentId: 'agent-abc' } as never)).decision).toBe('ask')
 })
 
 test('a message arriving mid-turn joins that turn, and marks it', async ($, on) => {

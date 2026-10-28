@@ -9,8 +9,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 type Config = { url: string; token: string; channel: string; channelId: string; member: string }
 type RoomMessage = { seq: number; id: string; from: string; to: string | null; text: string; sentAt: number }
-type Member = { name: string; login: string; isOnline: boolean; lastSeen: number | null; agents: { name: string; type: string | null }[] }
-type LocalAgent = { id: string; slug: string; type: string }
+type Member = { name: string; login: string; isOnline: boolean; lastSeen: number | null }
 
 const PREFIX = 'room:'
 const CLAIM = /(?:agent-rooms|room-chat)-claim: (https?:\/\/\S+\/c\/claim\/[\w-]+)/
@@ -25,7 +24,6 @@ const TURN_WINDOW_MS = 10 * 60 * 1000
 const POLL_MS = 60_000
 // Tools a channel turn may run without asking, beyond what is read-only.
 const CHANNEL_SAFE = new Set(['ListAgents', 'ToolSearch'])
-const LIVE = new Set(['pending', 'running', 'waiting', 'idle'])
 
 let sessionId = ''
 let sessionTitle = ''
@@ -41,9 +39,6 @@ let pulling = false
 let pullAgain = false
 let paused = false
 let channelTurnFrom: string | undefined
-// Subagent loops whose current turn a channel message started, by agent id.
-const agentTurns = new Map<string, string>()
-let publishedAgents = ''
 let turnTimes: number[] = []
 let stopPoll: (() => void) | undefined
 
@@ -134,6 +129,8 @@ export const register: Register = on => {
   // SendMessage to `room:<name>` (or `room:*`) goes to the channel instead of a local session.
   on('session.send', async ($, e, next) => {
     if (!e.to.startsWith(PREFIX)) return next(e)
+    // Only the main conversation takes part in channels.
+    if (e.agentId !== undefined) return { isDelivered: false as const, reason: 'Only the main session talks in channels; tell it what to send.' }
     if (!config) return { isDelivered: false as const, reason: 'This session is not in a channel. Join or create one first.' }
 
     const target = e.to.slice(PREFIX.length)
@@ -142,9 +139,7 @@ export const register: Register = on => {
     if (session !== undefined && members.length > 0 && !members.some(m => m.name === session) && !people.includes(session))
       return { isDelivered: false as const, reason: `No room:${session} in channel ${config.channel}. ListAgents shows who is there.` }
 
-    // A subagent speaks as <session>/<agent>, never as the main conversation.
-    const agent = e.agentId === undefined ? undefined : (await localAgents($)).find(a => a.id === e.agentId)?.slug
-    const sent = await call($, config, 'POST', 'messages', { id: crypto.randomUUID(), to, text: e.text, agent })
+    const sent = await call($, config, 'POST', 'messages', { id: crypto.randomUUID(), to, text: e.text })
     return sent.ok ? { isDelivered: true as const } : { isDelivered: false as const, reason: `Channel relay: ${sent.error}` }
   })
 
@@ -157,10 +152,7 @@ export const register: Register = on => {
       `Channel "${config.channel}" (remote sessions via agent-rooms; you are room:${config.member}):`,
       ...(others().length === 0
         ? ['  no other sessions connected yet']
-        : others().flatMap(m => [
-            `  ${PREFIX}${m.name} (${m.login}'s session) — ${m.isOnline ? 'online' : `offline, last seen ${ago(m.lastSeen)}; messages wait for it`}`,
-            ...(m.agents ?? []).map(a => `    ${PREFIX}${m.name}/${a.name}${a.type ? ` (${a.type} subagent)` : ' (subagent)'}`),
-          ])),
+        : others().map(m => `  ${PREFIX}${m.name} (${m.login}'s session) — ${m.isOnline ? 'online' : `offline, last seen ${ago(m.lastSeen)}; messages wait for it`}`)),
       ...(people.length > 0 ? [`  people (read on the website): ${people.map(p => PREFIX + p).join(', ')}`] : []),
       `  ${PREFIX}* — everyone in the channel`,
     ]
@@ -174,8 +166,7 @@ export const register: Register = on => {
       channelTurnFrom = from
       mainTurn = e.turnId
       unreadInTurn = 0
-    } else if (from !== undefined) agentTurns.set(e.agentId, from)
-    else agentTurns.delete(e.agentId)
+    }
     return next(e)
   })
 
@@ -196,17 +187,10 @@ export const register: Register = on => {
     return done
   })
 
-  // A new subagent becomes addressable in the channel as <session>/<agent>.
-  on('agent.spawn', async ($, e, next) => {
-    const spawned = await next(e)
-    if (config) void publishAgents($)
-    return spawned
-  })
-
   // In a channel-started turn, anything with side effects goes to the person.
   on('tool.check', async ($, e, next) => {
     const verdict = await next(e)
-    const from = e.agentId === undefined ? channelTurnFrom : agentTurns.get(e.agentId)
+    const from = e.agentId === undefined ? channelTurnFrom : undefined
     if (from === undefined || verdict.decision === 'deny') return verdict
     if (CHANNEL_SAFE.has(e.tool)) return verdict
     if (e.tool === 'SendMessage') {
@@ -216,7 +200,7 @@ export const register: Register = on => {
       return verdict
     }
     return { decision: 'ask' as const, reason: `This turn was started by a channel message from ${from}.` }
-  }).catch(($, e, next) => ((e.agentId === undefined ? channelTurnFrom : agentTurns.get(e.agentId)) === undefined ? next(e) : { decision: 'ask' as const }))
+  }).catch(($, e, next) => (e.agentId !== undefined || channelTurnFrom === undefined ? next(e) : { decision: 'ask' as const }))
 }
 
 async function claim($: EngineInterface, url: string): Promise<{ ok: true; config: Config } | { ok: false; error: string }> {
@@ -259,15 +243,10 @@ async function disconnect($: EngineInterface) {
 
 function connect($: EngineInterface) {
   stopPoll?.()
-  publishedAgents = ''
-  const timer = $.clock.every(POLL_MS, () => {
-    void pull($)
-    void publishAgents($)
-  })
+  const timer = $.clock.every(POLL_MS, () => void pull($))
   stopPoll = () => timer.cancel()
   void pull($)
   void refreshMembers($)
-  void publishAgents($)
   void runSocket($, ++socketGeneration)
 }
 
@@ -350,7 +329,7 @@ async function pull($: EngineInterface): Promise<void> {
       const fresh = all.filter(m => m.seq > delivered)
       if (fresh.length > 0) {
         if (!(await allowTurn($))) return
-        await route($, c, fresh)
+        await deliver($, c, fresh)
         await $.store.set(deliveredKey(c), fresh.at(-1)!.seq)
       }
       const last = all.at(-1)?.seq
@@ -362,25 +341,6 @@ async function pull($: EngineInterface): Promise<void> {
   } finally {
     pulling = false
   }
-}
-
-// A message for <this session>/<agent> goes into that subagent's own loop;
-// the rest, and any whose agent is no longer running, to the main session.
-async function route($: EngineInterface, c: Config, messages: RoomMessage[]) {
-  const agents = await localAgents($)
-  const main: RoomMessage[] = []
-  for (const m of messages) {
-    const slug = m.to?.startsWith(`${c.member}/`) ? m.to.slice(c.member.length + 1) : undefined
-    const agent = slug === undefined ? undefined : agents.find(a => a.slug === slug)
-    let why = 'which is not running in this session'
-    if (slug !== undefined && agent) {
-      const sent = await $.session.send({ to: { agentId: agent.id }, text: envelope(c, m) })
-      if (sent.isDelivered) continue
-      why = `which could not be reached: ${sent.reason}`
-    }
-    main.push(slug === undefined ? m : { ...m, text: `[for ${PREFIX}${m.to}, ${why}]\n${m.text}` })
-  }
-  if (main.length > 0) await deliver($, c, main)
 }
 
 const envelope = (c: Config, m: RoomMessage) => `${m.from} (channel ${c.channel}) sent a message:\n\n${m.text}`
@@ -421,34 +381,6 @@ function sessionName(): string {
   const title = sessionTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/, '')
   const id = sessionId.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 6) || 'local'
   return `${title || 'session'}-${id}`
-}
-
-// This session's subagents still alive, each with its channel name.
-async function localAgents($: EngineInterface): Promise<LocalAgent[]> {
-  const list = await $.agent.list()
-  const taken = new Set<string>()
-  return list
-    .filter(a => LIVE.has(a.status))
-    .map(a => {
-      let slug = slugify(a.name ?? `${a.type}-${a.id.slice(0, 6)}`)
-      if (taken.has(slug)) slug = slugify(`${slug}-${a.id.slice(0, 4)}`)
-      taken.add(slug)
-      return { id: a.id, slug, type: a.type }
-    })
-}
-
-function slugify(text: string): string {
-  const slug = text.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^[^a-z0-9]+/, '').slice(0, 48)
-  return slug || 'agent'
-}
-
-async function publishAgents($: EngineInterface) {
-  if (!config) return
-  const agents = (await localAgents($)).map(a => ({ name: a.slug, type: a.type }))
-  const body = JSON.stringify(agents)
-  if (body === publishedAgents) return
-  const sent = await call($, config, 'PUT', 'agents', { agents })
-  if (sent.ok) publishedAgents = body
 }
 
 async function allowTurn($: EngineInterface): Promise<boolean> {
@@ -493,7 +425,7 @@ async function call(
   $: EngineInterface,
   c: Config,
   method: 'GET' | 'POST' | 'PUT',
-  path: 'messages' | 'ack' | 'members' | 'agents' | 'leave',
+  path: 'messages' | 'ack' | 'members' | 'leave',
   body?: unknown,
 ): Promise<{ ok: true; body: unknown } | { ok: false; status: number; error: string }> {
   try {

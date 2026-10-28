@@ -67,12 +67,6 @@ function ChannelPage() {
                   <span>
                     <span className={`dot ${k.isOnline ? 'on' : ''}`} />
                     room:{k.member} <span className="muted">· {k.isOnline ? 'online' : `seen ${ago(k.last_seen_at)}`}</span>
-                    {k.agents.map(a => (
-                      <div key={a.name} className="muted" style={{ paddingLeft: 14 }}>
-                        room:{k.member}/{a.name}
-                        {a.type ? ` · ${a.type}` : ''}
-                      </div>
-                    ))}
                   </span>
                   <button className="link" onClick={() => act(() => api(`/connections/${k.id}`, { method: 'DELETE' }))}>
                     Disconnect

@@ -20,9 +20,8 @@ export type RoomMessage = {
 
 const MAX_TEXT = 16_000
 const MAX_PULL = 50
-const AGENT = /^[a-z0-9][a-z0-9._-]{0,47}$/
-// `<member>` or `<member>/<agent>`; a member is a session (`<login>.<session>`) or a login.
-const ADDRESS = /^[a-z0-9][a-z0-9._-]{0,95}(\/[a-z0-9][a-z0-9._-]{0,47})?$/
+// A session (`<login>.<session>`) or a person (`<login>`).
+const ADDRESS = /^[a-z0-9][a-z0-9._-]{0,95}$/
 const RETAIN_MS = 14 * 24 * 60 * 60 * 1000
 
 type Row = { seq: number; id: string; sender: string; recipient: string | null; text: string; sent_at: number }
@@ -46,13 +45,6 @@ export class Room extends DurableObject<Env> {
         member TEXT PRIMARY KEY,
         cursor INTEGER NOT NULL
       );
-      -- The agents each session runs besides its main loop, as it last published them.
-      CREATE TABLE IF NOT EXISTS agents (
-        member TEXT NOT NULL,
-        name TEXT NOT NULL,
-        type TEXT,
-        PRIMARY KEY (member, name)
-      );
     `)
   }
 
@@ -70,9 +62,7 @@ export class Room extends DurableObject<Env> {
       case 'POST /ack':
         return this.ack(member, await request.json())
       case 'GET /presence':
-        return json({ online: this.online(), agents: this.roster() })
-      case 'PUT /agents':
-        return this.publishAgents(member, await request.json())
+        return json({ online: this.online() })
       case 'GET /history':
         return this.history(Number(url.searchParams.get('limit') ?? 30))
       case 'POST /destroy':
@@ -86,7 +76,6 @@ export class Room extends DurableObject<Env> {
       // The name was disconnected or its owner removed: forget it.
       case 'POST /forget':
         this.sql.exec(`DELETE FROM cursors WHERE member = ?`, member)
-        this.sql.exec(`DELETE FROM agents WHERE member = ?`, member)
         return json({ closed: this.close(member, 4001, 'disconnected') })
       default:
         return json({ error: 'not found' }, 404)
@@ -117,18 +106,13 @@ export class Room extends DurableObject<Env> {
     return new Response(null, { status: 101, webSocket: client, headers: protocol ? { 'Sec-WebSocket-Protocol': protocol } : {} })
   }
 
-  // Addresses: `<member>` is a session's main conversation, `<member>/<agent>`
-  // one of its subagents. A message from a subagent carries its address, so
-  // it never reads as the main session.
   private post(member: string, body: unknown): Response {
-    const { id, to, text, agent } = (body ?? {}) as { id?: unknown; to?: unknown; text?: unknown; agent?: unknown }
+    const { id, to, text } = (body ?? {}) as { id?: unknown; to?: unknown; text?: unknown }
     if (typeof id !== 'string' || id.length === 0 || id.length > 64) return json({ error: 'id required' }, 400)
     if (typeof text !== 'string' || text.trim().length === 0) return json({ error: 'text required' }, 400)
     if (text.length > MAX_TEXT) return json({ error: `text over ${MAX_TEXT} characters` }, 413)
     if (to !== undefined && to !== null && (typeof to !== 'string' || !ADDRESS.test(to))) return json({ error: 'bad recipient address' }, 400)
-    if (agent !== undefined && agent !== null && (typeof agent !== 'string' || !AGENT.test(agent))) return json({ error: 'bad agent name' }, 400)
     this.cursorOf(member)
-    const sender = agent ? `${member}/${agent}` : member
 
     // The id makes a retried POST idempotent.
     const existing = this.sql.exec<{ seq: number }>(`SELECT seq FROM messages WHERE id = ?`, id).toArray()[0]
@@ -138,7 +122,7 @@ export class Room extends DurableObject<Env> {
       .exec<{ seq: number }>(
         `INSERT INTO messages (id, sender, recipient, text, sent_at) VALUES (?, ?, ?, ?, ?) RETURNING seq`,
         id,
-        sender,
+        member,
         (to as string | null | undefined) ?? null,
         text,
         Date.now(),
@@ -150,26 +134,19 @@ export class Room extends DurableObject<Env> {
     return json({ seq })
   }
 
-  // Everything after the cursor addressed to everyone, to this session, to
-  // one of its agents, or to the person it belongs to (all their sessions
-  // get it); never what this session (or its agents) sent.
+  // Everything after the cursor addressed to everyone, to this session, or to
+  // the person it belongs to (all their sessions get it); never its own.
   private pull(member: string): Response {
     const cursor = this.cursorOf(member)
-    const mine = `${member}/`
     const person = member.includes('.') ? member.slice(0, member.indexOf('.')) : member
     const messages = this.sql
       .exec<Row>(
         `SELECT * FROM messages
-         WHERE seq > ? AND sender != ? AND substr(sender, 1, ?) != ?
-           AND (recipient IS NULL OR recipient = ? OR substr(recipient, 1, ?) = ? OR recipient = ?)
+         WHERE seq > ? AND sender != ? AND (recipient IS NULL OR recipient = ? OR recipient = ?)
          ORDER BY seq LIMIT ?`,
         cursor,
         member,
-        mine.length,
-        mine,
         member,
-        mine.length,
-        mine,
         person,
         MAX_PULL,
       )
@@ -192,27 +169,6 @@ export class Room extends DurableObject<Env> {
       .toArray()
       .reverse()
     return json({ messages: rows.map(toMessage) })
-  }
-
-  // A session replaces its whole list of agents at once.
-  private publishAgents(member: string, body: unknown): Response {
-    const { agents } = (body ?? {}) as { agents?: unknown }
-    if (!Array.isArray(agents) || agents.length > 50) return json({ error: 'agents: a list of up to 50' }, 400)
-    const valid = agents.filter(
-      (a): a is { name: string; type?: string } => typeof a?.name === 'string' && AGENT.test(a.name) && (a.type === undefined || typeof a.type === 'string'),
-    )
-    const before = JSON.stringify(this.roster()[member] ?? [])
-    this.sql.exec(`DELETE FROM agents WHERE member = ?`, member)
-    for (const a of valid) this.sql.exec(`INSERT OR IGNORE INTO agents (member, name, type) VALUES (?, ?, ?)`, member, a.name, a.type?.slice(0, 64) ?? null)
-    if (JSON.stringify(this.roster()[member] ?? []) !== before) this.broadcast({ type: 'presence', online: this.online() }, member)
-    return json({ agents: valid.length })
-  }
-
-  private roster(): Record<string, { name: string; type: string | null }[]> {
-    const out: Record<string, { name: string; type: string | null }[]> = {}
-    for (const row of this.sql.exec<{ member: string; name: string; type: string | null }>(`SELECT * FROM agents ORDER BY member, name`).toArray())
-      (out[row.member] ??= []).push({ name: row.name, type: row.type })
-    return out
   }
 
   private close(member: string, code: number, reason: string): number {

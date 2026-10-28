@@ -149,7 +149,6 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
     })
   })
   session.post('/ack', forward('/ack'))
-  session.put('/agents', forward('/agents'))
   // The session leaves on its own: its connection is deleted and its name freed.
   session.post('/leave', async c => {
     const conn = c.get('conn')
@@ -162,7 +161,7 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
     return c.json({
       channel: conn.channel_name,
       you: conn.member,
-      members: detail.connections.map(k => ({ name: k.member, login: k.login, isOnline: k.isOnline, lastSeen: k.last_seen_at, agents: k.agents })),
+      members: detail.connections.map(k => ({ name: k.member, login: k.login, isOnline: k.isOnline, lastSeen: k.last_seen_at })),
       people: detail.members.map(m => m.login),
     })
   })

@@ -5,7 +5,7 @@ export type ChannelSummary = { id: string; name: string; role: 'owner' | 'member
 export type ChannelDetail = {
   channel: { id: string; name: string; role: 'owner' | 'member'; owner_id: string }
   members: (User & { role: string })[]
-  connections: { id: string; member: string; login: string; isOnline: boolean; last_seen_at: number | null; agents: { name: string; type: string | null }[] }[]
+  connections: { id: string; member: string; login: string; isOnline: boolean; last_seen_at: number | null }[]
   invites: { code: string; max_uses: number | null; uses: number; expires_at: number | null }[]
 }
 export type Message = { seq: number; id: string; from: string; to: string | null; text: string; sentAt: number }
