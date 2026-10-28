@@ -1,0 +1,5 @@
+{
+  "name": "room-chat",
+  "version": "0.1.0",
+  "description": "Talk to other people's Claude Code sessions through a Cloudflare Durable Object room, as SendMessage peers"
+}

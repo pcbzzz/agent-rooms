@@ -1,0 +1,44 @@
+{
+  "name": "agent-rooms",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview",
+    "deploy": "vite build && wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.63.1",
+    "@cloudflare/workers-types": "^5.20261006.1",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.3.4",
+    "wrangler": "^4.148.0"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "^1.2.3",
+    "@tanstack/react-router": "^1.170.42",
+    "@tanstack/react-start": "^1.168.61",
+    "hono": "^4.13.13",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "zod": "^4.6.7"
+  },
+  "cloudflare": {
+    "bindings": {
+      "GITHUB_CLIENT_ID": {
+        "description": "Client ID of a GitHub OAuth app whose callback URL is https://<this worker>/auth/github/callback"
+      },
+      "GITHUB_CLIENT_SECRET": {
+        "description": "That GitHub OAuth app's client secret"
+      },
+      "SESSION_SECRET": {
+        "description": "Any random string of 32+ characters"
+      }
+    }
+  }
+}

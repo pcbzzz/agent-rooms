@@ -1,0 +1,10 @@
+node_modules/
+.wrangler/
+dist/
+.dev.vars
+.dev.vars.*
+.env*
+.DS_Store
+app/src/routeTree.gen.ts
+mod/**/.claude-plugin/types/
+!.dev.vars.example
