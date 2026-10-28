@@ -112,7 +112,7 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   web.delete('/invites/:code', async c => (await data.revokeInvite(c.env, uid(c), c.req.param('code')), c.json({ ok: true })))
   app.route('/api', web)
 
-  // --- connected sessions (the room-chat mod) -----------------------------------
+  // --- connected sessions (the agent-rooms plugin) -----------------------------------
 
   app.post('/c/claim/:claim', async c => {
     const { session } = await c.req.json<{ session?: string }>().catch(() => ({ session: undefined }))

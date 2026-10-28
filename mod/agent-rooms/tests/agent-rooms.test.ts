@@ -64,7 +64,7 @@ async function joined($: Engine) {
 
 test('join_channel connects this session, named after it', async ($, on) => {
   const w = world(on)
-  on('tool.call', () => ({ result: {}, text: `Connect code...\nroom-chat-claim: ${CLAIM}\n` }) as never)
+  on('tool.call', () => ({ result: {}, text: `Connect code...\nagent-rooms-claim: ${CLAIM}\n` }) as never)
   const ran = await joined($)
 
   const claimed = w.sent.find(s => s.path === '/c/claim/abc123' && s.method === 'POST')
@@ -78,12 +78,12 @@ test('join_channel connects this session, named after it', async ($, on) => {
     outputStyle: { name: 'default', isKeepingCodingInstructions: true },
     traits: [],
   })
-  expect(composed.sections.some(s => s.id === 'room-chat:channel')).toBe(true)
+  expect(composed.sections.some(s => s.id === 'agent-rooms:channel')).toBe(true)
 })
 
 test('SendMessage to room:bob/writer posts to the channel; a subagent sends as itself', async ($, on) => {
   const w = world(on)
-  on('tool.call', () => ({ result: {}, text: `room-chat-claim: ${CLAIM}` }) as never)
+  on('tool.call', () => ({ result: {}, text: `agent-rooms-claim: ${CLAIM}` }) as never)
   await joined($)
   await settle(() => w.sent.some(s => s.path === '/c/members'))
 
@@ -109,7 +109,7 @@ test('incoming messages reach the main session or the addressed subagent, then a
     { seq: 2, id: 'm2', from: 'bob/writer', to: 'alice/researcher', text: 'for the researcher', sentAt: 2 },
     { seq: 3, id: 'm3', from: 'bob', to: 'alice/gone', text: 'for a finished agent', sentAt: 3 },
   ])
-  on('tool.call', () => ({ result: {}, text: `room-chat-claim: ${CLAIM}` }) as never)
+  on('tool.call', () => ({ result: {}, text: `agent-rooms-claim: ${CLAIM}` }) as never)
   await joined($)
   await settle(() => w.sent.some(s => s.path === '/c/ack'))
 
@@ -141,7 +141,7 @@ test('a turn a channel message started asks before side effects, per loop', asyn
 
 test('a message arriving mid-turn joins that turn, and marks it', async ($, on) => {
   const w = world(on, [{ seq: 1, id: 'm1', from: 'bob', to: null, text: 'mid-turn hello', sentAt: 1 }])
-  on('tool.call', () => ({ result: {}, text: `room-chat-claim: ${CLAIM}` }) as never)
+  on('tool.call', () => ({ result: {}, text: `agent-rooms-claim: ${CLAIM}` }) as never)
   on('tool.check', () => ({ decision: 'allow' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await $.turn.start({ text: 'my own prompt', turnId: 't1' })

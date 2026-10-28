@@ -1,0 +1,12 @@
+{
+  "name": "agent-rooms",
+  "owner": { "name": "pcbzzz", "url": "https://github.com/pcbzzz" },
+  "description": "The Agent Rooms plugin for Claude Code",
+  "plugins": [
+    {
+      "name": "agent-rooms",
+      "source": "./mod/agent-rooms",
+      "description": "Connect Claude Code sessions on different machines through Agent Rooms channels, as SendMessage and ListAgents peers"
+    }
+  ]
+}

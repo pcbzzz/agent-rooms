@@ -13,7 +13,7 @@ type Member = { name: string; login: string; isOnline: boolean; lastSeen: number
 type LocalAgent = { id: string; slug: string; type: string }
 
 const PREFIX = 'room:'
-const CLAIM = /room-chat-claim: (https?:\/\/\S+\/c\/claim\/[\w-]+)/
+const CLAIM = /(?:agent-rooms|room-chat)-claim: (https?:\/\/\S+\/c\/claim\/[\w-]+)/
 // The agent-rooms MCP tools whose result carries a connect code for this session.
 const CONNECTING_TOOLS = ['__join_channel', '__create_channel']
 const CLAIM_URL = /^https?:\/\/\S+\/c\/claim\/[\w-]+$/
@@ -120,7 +120,7 @@ export const register: Register = on => {
     const joined = await claim($, url)
     const note = joined.ok
       ? `This session is now in channel "${joined.config.channel}" as room:${joined.config.member}.\n\n${channelSection(joined.config)}`
-      : `The room-chat mod could not connect this session: ${joined.error}`
+      : `The agent-rooms plugin could not connect this session: ${joined.error}`
     return { ...ran, context: [...(ran.context ?? []), note] }
   })
 
@@ -128,7 +128,7 @@ export const register: Register = on => {
   on('prompt.compose', async ($, e, next) => {
     const composed = await next(e)
     if (!config) return composed
-    return { sections: [...composed.sections, { id: 'room-chat:channel', text: channelSection(config), scope: 'session' as const }] }
+    return { sections: [...composed.sections, { id: 'agent-rooms:channel', text: channelSection(config), scope: 'session' as const }] }
   })
 
   // SendMessage to `room:<name>` (or `room:*`) goes to the channel instead of a local session.
@@ -154,7 +154,7 @@ export const register: Register = on => {
     if (!config || ran.deny !== undefined || ran.isError) return ran
     await refreshMembers($)
     const lines = [
-      `Channel "${config.channel}" (remote sessions via room-chat; you are room:${config.member}):`,
+      `Channel "${config.channel}" (remote sessions via agent-rooms; you are room:${config.member}):`,
       ...(others().length === 0
         ? ['  no other sessions connected yet']
         : others().flatMap(m => [
@@ -322,7 +322,7 @@ async function onSocketEvent($: EngineInterface, line: string) {
   if (event.type === 'status') {
     socketState = event.state === 'open' ? 'open' : event.state === 'revoked' ? 'revoked' : 'closed'
     if (event.state === 'revoked') {
-      $.ui.toast(`room-chat: this session was disconnected from ${config?.channel ?? 'its channel'}.`)
+      $.ui.toast(`agent-rooms: this session was disconnected from ${config?.channel ?? 'its channel'}.`)
       await disconnect($)
     }
   }
@@ -454,7 +454,7 @@ async function allowTurn($: EngineInterface): Promise<boolean> {
   turnTimes = [...turnTimes.filter(t => now - t < TURN_WINDOW_MS), now]
   if (turnTimes.length <= TURN_LIMIT) return true
   paused = true
-  $.ui.toast(`room-chat paused: ${TURN_LIMIT}+ channel turns in 10 minutes. Messages are kept; /room resume to continue.`)
+  $.ui.toast(`agent-rooms paused: ${TURN_LIMIT}+ channel turns in 10 minutes. Messages are kept; /room resume to continue.`)
   showStatus($)
   return false
 }

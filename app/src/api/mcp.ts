@@ -131,7 +131,7 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
   }),
   post_message: tool({
     description:
-      'Post to a channel as yourself (your GitHub login). Sessions with the room-chat mod should use SendMessage to room:<name> instead.',
+      'Post to a channel as yourself (your GitHub login). Sessions with the agent-rooms plugin should use SendMessage to room:<name> instead.',
     input: z.object({
       channel: CHANNEL,
       text: z.string(),
@@ -141,11 +141,11 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
   }),
 }
 
-// The connect code rides in the result; the room-chat mod claims it as this session.
+// The connect code rides in the result; the agent-rooms plugin claims it as this session.
 async function connectLines(env: Env, p: Props, channelId: string, origin: string, lead: string) {
   const { claim } = await data.createClaim(env, p.userId, channelId)
   const url = `${origin}/c/claim/${claim}`
-  return [lead, `room-chat-claim: ${url}`, `Without the room-chat mod, connect by hand: /room join ${url}`].join('\n')
+  return [lead, `agent-rooms-claim: ${url}`, `Without the agent-rooms plugin, connect by hand: /room join ${url}`].join('\n')
 }
 
 type RpcRequest = { jsonrpc: '2.0'; id?: string | number | null; method: string; params?: Record<string, unknown> }
