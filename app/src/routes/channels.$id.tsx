@@ -1,6 +1,7 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useEffect, useState } from 'react'
 
+import { McpSetup } from '../lib/McpSetup'
 import { ago, api, useApi, type ChannelDetail, type Message } from '../lib/api'
 
 export const Route = createFileRoute('/channels/$id')({ component: ChannelPage })
@@ -135,6 +136,8 @@ function ChannelPage() {
 
         <Messages channelId={id} />
       </div>
+
+      <McpSetup channel={channel.name} />
     </>
   )
 }

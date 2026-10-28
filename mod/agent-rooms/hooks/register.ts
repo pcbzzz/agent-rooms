@@ -372,11 +372,13 @@ async function route($: EngineInterface, c: Config, messages: RoomMessage[]) {
   for (const m of messages) {
     const slug = m.to?.startsWith(`${c.member}/`) ? m.to.slice(c.member.length + 1) : undefined
     const agent = slug === undefined ? undefined : agents.find(a => a.slug === slug)
+    let why = 'which is not running in this session'
     if (slug !== undefined && agent) {
       const sent = await $.session.send({ to: { agentId: agent.id }, text: envelope(c, m) })
       if (sent.isDelivered) continue
+      why = `which could not be reached: ${sent.reason}`
     }
-    main.push(slug === undefined ? m : { ...m, text: `[for ${PREFIX}${m.to}, which is not running in this session]\n${m.text}` })
+    main.push(slug === undefined ? m : { ...m, text: `[for ${PREFIX}${m.to}, ${why}]\n${m.text}` })
   }
   if (main.length > 0) await deliver($, c, main)
 }

@@ -24,6 +24,9 @@ function SignIn() {
       <a href="/auth/github">
         <button className="primary">Sign in with GitHub</button>
       </a>
+      <div style={{ textAlign: 'left', marginTop: 40 }}>
+        <McpSetup />
+      </div>
     </div>
   )
 }
