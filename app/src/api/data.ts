@@ -66,18 +66,21 @@ export function getUser(env: Env, id: string) {
 }
 
 // A user added by GitHub username before they ever signed in gets a row
-// keyed by their GitHub id, which their first sign-in then claims.
+// holding just that login, which their first GitHub sign-in then claims.
+// GitHub's API is asked only to catch typos; it often rate-limits Workers.
 async function userByLogin(env: Env, login: string): Promise<User> {
   const clean = login.replace(/^@/, '').toLowerCase()
+  if (!/^[a-z0-9](?:[a-z0-9]|-(?=[a-z0-9])){0,38}$/.test(clean)) throw new UserError(400, `${login} is not a GitHub username.`)
   const found = await env.DB.prepare(`SELECT id, login, name, avatar_url FROM users WHERE login = ?`).bind(clean).first<User>()
   if (found) return found
   const res = await fetch(`https://api.github.com/users/${encodeURIComponent(clean)}`, {
     headers: { 'User-Agent': 'agent-rooms', Accept: 'application/vnd.github+json' },
-  })
-  if (res.status === 404) throw new UserError(404, `No GitHub user ${clean}.`)
-  if (!res.ok) throw new UserError(400, `GitHub lookup failed (${res.status}).`)
-  const gh = (await res.json()) as { id: number; login: string; name: string | null; avatar_url: string }
-  return upsertGithubUser(env, gh)
+  }).catch(() => undefined)
+  if (res?.status === 404) throw new UserError(404, `No GitHub user ${clean}.`)
+  if (res?.ok) return upsertGithubUser(env, (await res.json()) as { id: number; login: string; name: string | null; avatar_url: string })
+  const id = randomId()
+  await env.DB.prepare(`INSERT INTO users (id, github_id, login, name, avatar_url, created_at) VALUES (?, NULL, ?, NULL, NULL, ?)`).bind(id, clean, now()).run()
+  return (await getUser(env, id))!
 }
 
 // --- channels ----------------------------------------------------------------
