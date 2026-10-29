@@ -61,73 +61,75 @@ function ChannelPage() {
 
   return (
     <>
-      <Link to="/" className="back">
-        <Icon name="back" size={14} /> Channels
-      </Link>
-      <div className="channel-head">
-        <div>
-          <h1>{channel.name}</h1>
-          <div className="meta">
-            <span className={`badge ${isOwner ? 'accent' : ''}`}>{isOwner ? 'Owner' : 'Member'}</span>
-            {channel.encrypted ? (
-              <span className="badge">
-                <Icon name="lock" size={12} /> End-to-end encrypted
-              </span>
-            ) : null}
-            <span className="badge">
-              <span className={`dot ${online > 0 ? 'on' : ''}`} /> {online} of {connections.length} sessions online
-            </span>
-          </div>
-        </div>
-        {isOwner && (
-          <ActionMenu
-            trigger={
-              <button className="ghost" aria-label="Channel actions">
-                <Icon name="more" size={18} />
-              </button>
-            }
-            items={[
-              { label: 'Rename', icon: <Icon name="pencil" size={15} />, onSelect: () => setDialog('rename') },
-              ...(channel.encrypted ? [] : [{ label: 'Turn on encryption', icon: <Icon name="lock" size={15} />, onSelect: () => setDialog('encrypt') }]),
-              'separator' as const,
-              { label: 'Delete channel', icon: <Icon name="trash" size={15} />, danger: true, onSelect: () => setDialog('delete') },
-            ]}
-          />
-        )}
-      </div>
-      <RenameChannel
-        open={dialog === 'rename'}
-        onOpenChange={open => setDialog(open ? 'rename' : undefined)}
-        name={channel.name}
-        onRename={name => act(() => api(`/channels/${id}`, { method: 'PATCH', body: { name } }))}
-      />
-      <EncryptChannel
-        open={dialog === 'encrypt'}
-        onOpenChange={open => setDialog(open ? 'encrypt' : undefined)}
-        name={channel.name}
-        onEncrypt={clearHistory => act(() => api(`/channels/${id}/encrypt`, { method: 'POST', body: { clearHistory } })).then(() => devs.reload())}
-      />
-      <Confirm
-        open={dialog === 'delete'}
-        onOpenChange={open => setDialog(open ? 'delete' : undefined)}
-        title={`Delete "${channel.name}"?`}
-        description="Its messages, invites and connected sessions go with it. This can't be undone."
-        confirm="Delete channel"
-        danger
-        onConfirm={() => void act(() => api(`/channels/${id}`, { method: 'DELETE' })).then(() => location.assign('/'))}
-      />
-      {error && <div className="error">{error}</div>}
-
       <div className="layout">
-        <Messages
-          channelId={id}
-          recipients={[...connections.map(k => k.member), ...members.map(m => m.login)]}
-          devices={devs.data?.devices ?? []}
-          device={device}
-          trustTick={trustTick}
-          onUnlock={unlock}
-          encrypted={!!channel.encrypted}
-        />
+        <div className="main">
+          <Link to="/" className="back">
+            <Icon name="back" size={14} /> Channels
+          </Link>
+          <div className="channel-head">
+            <div>
+              <h1>{channel.name}</h1>
+              <div className="meta">
+                <span className={`badge ${isOwner ? 'accent' : ''}`}>{isOwner ? 'Owner' : 'Member'}</span>
+                {channel.encrypted ? (
+                  <span className="badge">
+                    <Icon name="lock" size={12} /> End-to-end encrypted
+                  </span>
+                ) : null}
+                <span className="badge">
+                  <span className={`dot ${online > 0 ? 'on' : ''}`} /> {online} of {connections.length} sessions online
+                </span>
+              </div>
+            </div>
+            {isOwner && (
+              <ActionMenu
+                trigger={
+                  <button className="ghost" aria-label="Channel actions">
+                    <Icon name="more" size={18} />
+                  </button>
+                }
+                items={[
+                  { label: 'Rename', icon: <Icon name="pencil" size={15} />, onSelect: () => setDialog('rename') },
+                  ...(channel.encrypted ? [] : [{ label: 'Turn on encryption', icon: <Icon name="lock" size={15} />, onSelect: () => setDialog('encrypt') }]),
+                  'separator' as const,
+                  { label: 'Delete channel', icon: <Icon name="trash" size={15} />, danger: true, onSelect: () => setDialog('delete') },
+                ]}
+              />
+            )}
+          </div>
+          <RenameChannel
+            open={dialog === 'rename'}
+            onOpenChange={open => setDialog(open ? 'rename' : undefined)}
+            name={channel.name}
+            onRename={name => act(() => api(`/channels/${id}`, { method: 'PATCH', body: { name } }))}
+          />
+          <EncryptChannel
+            open={dialog === 'encrypt'}
+            onOpenChange={open => setDialog(open ? 'encrypt' : undefined)}
+            name={channel.name}
+            onEncrypt={clearHistory => act(() => api(`/channels/${id}/encrypt`, { method: 'POST', body: { clearHistory } })).then(() => devs.reload())}
+          />
+          <Confirm
+            open={dialog === 'delete'}
+            onOpenChange={open => setDialog(open ? 'delete' : undefined)}
+            title={`Delete "${channel.name}"?`}
+            description="Its messages, invites and connected sessions go with it. This can't be undone."
+            confirm="Delete channel"
+            danger
+            onConfirm={() => void act(() => api(`/channels/${id}`, { method: 'DELETE' })).then(() => location.assign('/'))}
+          />
+          {error && <div className="error">{error}</div>}
+
+          <Messages
+            channelId={id}
+            recipients={[...connections.map(k => k.member), ...members.map(m => m.login)]}
+            devices={devs.data?.devices ?? []}
+            device={device}
+            trustTick={trustTick}
+            onUnlock={unlock}
+            encrypted={!!channel.encrypted}
+          />
+        </div>
 
         <aside className="sidebar">
           {channel.encrypted ? (

@@ -145,8 +145,17 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
 @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
 /* Sticky, and scrolls on its own when taller than the window, so nothing is cut off. */
-.sidebar { display: flex; flex-direction: column; gap: 20px; position: sticky; top: 78px; max-height: calc(100dvh - 98px); overflow-y: auto; padding-bottom: 2px; scrollbar-width: thin; }
-@media (max-width: 900px) { .sidebar { position: static; max-height: none; overflow: visible; } }
+.main { min-width: 0; }
+/* Starts at the top of the page content, where it also sticks, so its scroll
+   area always runs from under the top bar to the window's bottom edge. The
+   page's top spacing lives inside it, so cards scroll to those edges. */
+.sidebar {
+  display: flex; flex-direction: column; gap: 20px;
+  position: sticky; top: 58px; max-height: calc(100dvh - 58px);
+  margin-top: -36px; padding: 36px 0 20px;
+  overflow-y: auto; scrollbar-width: thin;
+}
+@media (max-width: 900px) { .sidebar { position: static; max-height: none; overflow: visible; margin-top: 0; padding: 0; } }
 
 .composer { padding: 14px; display: flex; gap: 10px; align-items: flex-end; border-bottom: 1px solid var(--line); }
 .composer textarea { flex: 1; resize: none; height: 36px; min-height: 36px; max-height: 160px; line-height: 1.45; padding: 7px 12px; }
