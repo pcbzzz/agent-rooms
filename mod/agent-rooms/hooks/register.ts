@@ -325,6 +325,11 @@ async function onHelperEvent($: EngineInterface, line: string) {
     }
   }
   if (event.type === 'wake') void pull($)
+  // The channel's settings changed (it became encrypted): re-read them, and ask about devices.
+  if (event.type === 'settings') {
+    await refreshMembers($)
+    void reviewDevices($)
+  }
   if (event.type === 'presence' && Array.isArray(event.online)) {
     const online = new Set(event.online)
     members = members.map(m => ({ ...m, isOnline: online.has(m.name) }))
@@ -530,7 +535,7 @@ async function releaseHeld($: EngineInterface, deviceIdValue: string, approved: 
 // --- sending and receiving ---------------------------------------------------------
 
 // Encrypts to the approved devices the address reaches, and posts it.
-async function send($: EngineInterface, target: string, text: string, files: string[]): Promise<{ ok: true; note?: string } | { ok: false; error: string }> {
+async function send($: EngineInterface, target: string, text: string, files: string[], retried = false): Promise<{ ok: true; note?: string } | { ok: false; error: string }> {
   if (!config) return { ok: false, error: 'This session is not in a channel. Join or create one first.' }
   const c = config
   if (!device && (c.encrypted || files.length > 0))
@@ -544,7 +549,13 @@ async function send($: EngineInterface, target: string, text: string, files: str
     try {
       const uploaded = files.length ? (await helper<{ files: unknown[] }>($, 'POST', '/upload', { files, server: { url: c.url, token: c.token } })).files : []
       const sent = await call($, c, 'POST', 'messages', { id: crypto.randomUUID(), to, text, files: uploaded })
-      return sent.ok ? { ok: true } : { ok: false, error: `Channel relay: ${sent.error}` }
+      if (sent.ok) return { ok: true }
+      // The channel was just turned encrypted: send it that way instead.
+      if (!retried && /encrypted/i.test(sent.error)) {
+        await refreshMembers($)
+        if (config?.encrypted) return send($, target, text, files, true)
+      }
+      return { ok: false, error: `Channel relay: ${sent.error}` }
     } catch (error) {
       return { ok: false, error: `Could not upload: ${String(error)}` }
     }

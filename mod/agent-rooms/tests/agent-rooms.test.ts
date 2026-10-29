@@ -18,7 +18,7 @@ function world(
     aliceOnline?: boolean
     trust?: Record<string, { decision: string }>
     answer?: string
-    encrypted?: boolean
+    encrypted?: boolean | { encrypted: boolean }
   } = {},
 ) {
   const sent: Sent[] = []
@@ -71,7 +71,7 @@ function world(
     }
 
     sent.push({ method, path: url.pathname, body })
-    const encrypted = opts.encrypted ?? true
+    const encrypted = typeof opts.encrypted === 'object' ? opts.encrypted.encrypted : (opts.encrypted ?? true)
     if (url.pathname === '/c/claim/abc123') return reply({ token: 'crt_tok', channelId: 'ch1', channel: 'pairing', member: 'alice', url: URL, encrypted })
     if (url.pathname === '/c/members')
       return reply({
@@ -89,6 +89,7 @@ function world(
       pending = []
       return reply({ cursor: 0, messages })
     }
+    if (url.pathname === '/c/messages' && encrypted && body?.envelope === undefined) return reply({ error: 'This channel is end-to-end encrypted: send an encrypted envelope.' }, 400)
     return reply({ ok: true, seq: 1 })
   })
   // The approval dialog ($.ui.ask) and the agent-rooms MCP tools.
@@ -291,4 +292,15 @@ test('a plain channel delivers new and older messages, with attachments saved', 
 
   expect(w.submitted[0]).toContain('an older bare message')
   expect(w.submitted[0]).toContain('with a picture\n[image: /tmp/agent-rooms/ch1/pic.png]')
+})
+
+test('a send that races the channel turning encrypted is sent encrypted', async ($, on) => {
+  const flag = { encrypted: false }
+  const w = world(on, { encrypted: flag })
+  await joined($)
+  flag.encrypted = true
+
+  expect(await $.session.send({ to: 'room:*', text: 'hello after the switch' } as never)).toEqual({ isDelivered: true })
+  // Refused as plain text, then sent again encrypted to the approved device.
+  expect(w.helperCalls.find(c => c.path === '/seal')?.body).toMatchObject({ text: 'hello after the switch', recipients: [{ id: 'dev-bob' }] })
 })

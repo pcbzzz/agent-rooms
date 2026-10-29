@@ -66,6 +66,14 @@ export class Room extends DurableObject<Env> {
         return json({ online: this.online() })
       case 'GET /history':
         return this.history(Number(url.searchParams.get('limit') ?? 30))
+      // The channel's settings changed (it became encrypted): sessions re-read them.
+      case 'POST /notify':
+        this.broadcast({ type: 'settings' })
+        return json({ ok: true })
+      // Drops the message history; delivery cursors stay.
+      case 'POST /purge':
+        this.sql.exec(`DELETE FROM messages`)
+        return json({ ok: true })
       case 'POST /destroy':
         for (const ws of this.ctx.getWebSockets()) ws.close(4000, 'channel deleted')
         await this.ctx.storage.deleteAll()

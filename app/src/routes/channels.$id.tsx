@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react'
 
 import { McpSetup } from '../lib/McpSetup'
 import { ago, api, useApi, type ChannelDetail, type Message, type User } from '../lib/api'
+import { ActionMenu, Confirm, Modal, ModalClose, TextField, Tip, Toggle } from '../lib/base'
 import * as e2e from '../lib/e2e'
 import { Address, Avatar, CopyButton, Icon, splitAddress } from '../lib/ui'
 
@@ -17,6 +18,7 @@ function ChannelPage() {
   // Bumped when this browser approves or denies a device, so messages are opened again.
   const [trustTick, setTrustTick] = useState(0)
   const [error, setError] = useState<string>()
+  const [dialog, setDialog] = useState<'rename' | 'encrypt' | 'delete'>()
 
   const unlock = async () => {
     const user = me.data?.user
@@ -78,28 +80,42 @@ function ChannelPage() {
           </div>
         </div>
         {isOwner && (
-          <div className="row">
-            <button
-              className="ghost"
-              onClick={() => {
-                const name = prompt('Rename channel', channel.name)
-                if (name) void act(() => api(`/channels/${id}`, { method: 'PATCH', body: { name } }))
-              }}
-            >
-              <Icon name="pencil" /> Rename
-            </button>
-            <button
-              className="ghost danger"
-              onClick={() =>
-                confirm(`Delete "${channel.name}" with its history and connections?`) &&
-                void act(() => api(`/channels/${id}`, { method: 'DELETE' })).then(() => location.assign('/'))
-              }
-            >
-              <Icon name="trash" /> Delete
-            </button>
-          </div>
+          <ActionMenu
+            trigger={
+              <button className="ghost" aria-label="Channel actions">
+                <Icon name="more" size={18} />
+              </button>
+            }
+            items={[
+              { label: 'Rename', icon: <Icon name="pencil" size={15} />, onSelect: () => setDialog('rename') },
+              ...(channel.encrypted ? [] : [{ label: 'Turn on encryption', icon: <Icon name="lock" size={15} />, onSelect: () => setDialog('encrypt') }]),
+              'separator' as const,
+              { label: 'Delete channel', icon: <Icon name="trash" size={15} />, danger: true, onSelect: () => setDialog('delete') },
+            ]}
+          />
         )}
       </div>
+      <RenameChannel
+        open={dialog === 'rename'}
+        onOpenChange={open => setDialog(open ? 'rename' : undefined)}
+        name={channel.name}
+        onRename={name => act(() => api(`/channels/${id}`, { method: 'PATCH', body: { name } }))}
+      />
+      <EncryptChannel
+        open={dialog === 'encrypt'}
+        onOpenChange={open => setDialog(open ? 'encrypt' : undefined)}
+        name={channel.name}
+        onEncrypt={clearHistory => act(() => api(`/channels/${id}/encrypt`, { method: 'POST', body: { clearHistory } })).then(() => devs.reload())}
+      />
+      <Confirm
+        open={dialog === 'delete'}
+        onOpenChange={open => setDialog(open ? 'delete' : undefined)}
+        title={`Delete "${channel.name}"?`}
+        description="Its messages, invites and connected sessions go with it. This can't be undone."
+        confirm="Delete channel"
+        danger
+        onConfirm={() => void act(() => api(`/channels/${id}`, { method: 'DELETE' })).then(() => location.assign('/'))}
+      />
       {error && <div className="error">{error}</div>}
 
       <div className="layout">
@@ -132,9 +148,11 @@ function ChannelPage() {
                       <div className="sub">{k.isOnline ? 'Online' : `Seen ${ago(k.last_seen_at)}`}</div>
                     </div>
                     <span className="actions">
-                      <button className="ghost small danger" title="Disconnect" onClick={() => void act(() => api(`/connections/${k.id}`, { method: 'DELETE' }))}>
-                        <Icon name="x" size={14} />
-                      </button>
+                      <Tip label="Disconnect">
+                        <button className="ghost small danger" onClick={() => void act(() => api(`/connections/${k.id}`, { method: 'DELETE' }))}>
+                          <Icon name="x" size={14} />
+                        </button>
+                      </Tip>
                     </span>
                   </li>
                 ))}
@@ -156,9 +174,11 @@ function ChannelPage() {
                     ) : (
                       isOwner && (
                         <span className="actions">
-                          <button className="ghost small danger" title="Remove" onClick={() => void act(() => api(`/channels/${id}/members/${m.login}`, { method: 'DELETE' }))}>
-                            <Icon name="x" size={14} />
-                          </button>
+                          <Tip label={`Remove ${m.login}`}>
+                            <button className="ghost small danger" onClick={() => void act(() => api(`/channels/${id}/members/${m.login}`, { method: 'DELETE' }))}>
+                              <Icon name="x" size={14} />
+                            </button>
+                          </Tip>
                         </span>
                       )
                     )}
@@ -189,9 +209,11 @@ function ChannelPage() {
                       </div>
                       <CopyButton text={`${location.origin}/invite/${i.code}`} />
                       <span className="actions">
-                        <button className="ghost small danger" title="Revoke" onClick={() => void act(() => api(`/invites/${i.code}`, { method: 'DELETE' }))}>
-                          <Icon name="x" size={14} />
-                        </button>
+                        <Tip label="Revoke">
+                          <button className="ghost small danger" onClick={() => void act(() => api(`/invites/${i.code}`, { method: 'DELETE' }))}>
+                            <Icon name="x" size={14} />
+                          </button>
+                        </Tip>
                       </span>
                     </li>
                   ))}
@@ -436,18 +458,22 @@ function Messages({
               e.target.value = ''
             }}
           />
-          <button type="button" className="ghost" title="Attach files" onClick={() => picker.current?.click()}>
-            <Icon name="paperclip" size={16} />
-          </button>
+          <Tip label="Attach files">
+            <button type="button" className="ghost" onClick={() => picker.current?.click()}>
+              <Icon name="paperclip" size={16} />
+            </button>
+          </Tip>
           <input className="to" list="recipients" placeholder="To everyone" value={to} onChange={e => setTo(e.target.value)} />
           <datalist id="recipients">
             {[...new Set(recipients)].map(r => (
               <option key={r} value={r} />
             ))}
           </datalist>
-          <button className="primary" disabled={sending || (!text.trim() && files.length === 0)} title="Send (⌘↵)">
-            <Icon name="send" size={15} />
-          </button>
+          <Tip label="Send (⌘↵)">
+            <button className="primary" disabled={sending || (!text.trim() && files.length === 0)}>
+              <Icon name="send" size={15} />
+            </button>
+          </Tip>
         </form>
       ) : (
         <div className="locked">
@@ -516,7 +542,9 @@ function MessageRow({
           </div>
         ) : (
           <>
-            {encrypted && opened?.status === 'plain' && <div className="msg-note">Not encrypted; anyone with server access could read it.</div>}
+            {encrypted && (opened?.status === 'plain' || (opened?.status === 'ok' && opened.plain)) && (
+              <div className="msg-note">Sent before this channel was encrypted, so the server can read it.</div>
+            )}
             {text && <div className={`msg-text ${long && !open ? 'clamped' : ''}`}>{text}</div>}
             {long && (
               <button className="more" onClick={() => setOpen(!open)}>
@@ -551,5 +579,62 @@ function Attachment({ channelId, file }: { channelId: string; file: NonNullable<
     <a className="file-chip" href={url} download={file.name}>
       <Icon name="paperclip" size={13} /> {file.name} <span className="muted">{Math.ceil(file.size / 1024)} KB</span>
     </a>
+  )
+}
+
+function RenameChannel({ open, onOpenChange, name, onRename }: { open: boolean; onOpenChange: (open: boolean) => void; name: string; onRename: (name: string) => Promise<void> }) {
+  const [value, setValue] = useState(name)
+  useEffect(() => {
+    if (open) setValue(name)
+  }, [open, name])
+  return (
+    <Modal open={open} onOpenChange={onOpenChange} title="Rename channel">
+      <form
+        className="dialog-form"
+        onSubmit={e => {
+          e.preventDefault()
+          if (value.trim() && value.trim() !== name) void onRename(value.trim()).then(() => onOpenChange(false))
+        }}
+      >
+        <TextField label="Name" value={value} onChange={e => setValue(e.target.value)} autoFocus />
+        <div className="dialog-actions">
+          <ModalClose className="ghost" type="button">
+            Cancel
+          </ModalClose>
+          <button className="primary" disabled={!value.trim() || value.trim() === name}>
+            Rename
+          </button>
+        </div>
+      </form>
+    </Modal>
+  )
+}
+
+function EncryptChannel({ open, onOpenChange, name, onEncrypt }: { open: boolean; onOpenChange: (open: boolean) => void; name: string; onEncrypt: (clearHistory: boolean) => Promise<void> }) {
+  const [clear, setClear] = useState(false)
+  const [busy, setBusy] = useState(false)
+  return (
+    <Confirm
+      open={open}
+      onOpenChange={onOpenChange}
+      title={`Turn on encryption for "${name}"?`}
+      description="From now on, messages are readable only by devices each member approves, and the server can't read them. Everyone's devices need approving once. This can't be turned off."
+      confirm="Turn on encryption"
+      busy={busy}
+      onConfirm={() => {
+        setBusy(true)
+        void onEncrypt(clear).finally(() => {
+          setBusy(false)
+          onOpenChange(false)
+        })
+      }}
+    >
+      <Toggle
+        checked={clear}
+        onCheckedChange={setClear}
+        label="Delete the existing messages"
+        description="They were sent unencrypted, so the server can read them. Otherwise they stay, marked as not encrypted."
+      />
+    </Confirm>
   )
 }

@@ -1,5 +1,7 @@
 import { useState, type ReactNode } from 'react'
 
+import { Tip } from './base'
+
 const PATHS: Record<string, ReactNode> = {
   copy: (
     <>
@@ -39,6 +41,13 @@ const PATHS: Record<string, ReactNode> = {
     <>
       <circle cx="12" cy="12" r="9" />
       <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+    </>
+  ),
+  more: (
+    <>
+      <circle cx="5" cy="12" r="1.4" fill="currentColor" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" />
+      <circle cx="19" cy="12" r="1.4" fill="currentColor" />
     </>
   ),
   paperclip: <path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7-7L13 4.5a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6" />,
@@ -95,17 +104,19 @@ export function Address({ address }: { address: string }) {
 export function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
   return (
-    <button
-      className="ghost small"
-      onClick={() =>
-        navigator.clipboard.writeText(text).then(() => {
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1400)
-        })
-      }
-    >
-      <Icon name={copied ? 'check' : 'copy'} size={14} />
-      {label && <span>{copied ? 'Copied' : label}</span>}
-    </button>
+    <Tip label={copied ? 'Copied' : 'Copy'}>
+      <button
+        className="ghost small"
+        onClick={() =>
+          navigator.clipboard.writeText(text).then(() => {
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1400)
+          })
+        }
+      >
+        <Icon name={copied ? 'check' : 'copy'} size={14} />
+        {label && <span>{copied ? 'Copied' : label}</span>}
+      </button>
+    </Tip>
   )
 }

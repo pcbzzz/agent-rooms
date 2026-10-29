@@ -90,6 +90,10 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   })
   web.get('/channels/:id', async c => c.json(await data.channelDetail(c.env, uid(c), c.req.param('id'))))
   web.patch('/channels/:id', async c => c.json(await data.renameChannel(c.env, uid(c), c.req.param('id'), (await c.req.json<{ name: string }>()).name)))
+  web.post('/channels/:id/encrypt', async c => {
+    const { clearHistory } = await c.req.json<{ clearHistory?: boolean }>().catch(() => ({ clearHistory: false }))
+    return c.json(await data.encryptChannel(c.env, uid(c), c.req.param('id'), !!clearHistory))
+  })
   web.delete('/channels/:id', async c => c.json(await data.deleteChannel(c.env, uid(c), c.req.param('id'))))
   web.get('/channels/:id/messages', async c => c.json(await data.readMessages(c.env, uid(c), c.req.param('id'), Number(c.req.query('limit') ?? 50))))
   web.post('/channels/:id/messages', async c => {

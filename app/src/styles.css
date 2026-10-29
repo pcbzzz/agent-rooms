@@ -129,8 +129,6 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 /* Channel list */
 .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
 .page-head p { color: var(--text-2); margin: 6px 0 0; }
-.create { display: flex; gap: 8px; }
-.create input:not([type=checkbox]) { width: 240px; }
 .channels { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; margin-bottom: 32px; }
 .channel-card { display: flex; flex-direction: column; gap: 14px; padding: 18px; transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s; }
 .channel-card:hover { border-color: var(--line-strong); transform: translateY(-2px); }
@@ -146,8 +144,9 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .channel-head .meta { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 20px; align-items: start; }
 @media (max-width: 900px) { .layout { grid-template-columns: 1fr; } }
-.sidebar { display: flex; flex-direction: column; gap: 20px; position: sticky; top: 78px; }
-@media (max-width: 900px) { .sidebar { position: static; } }
+/* Sticky, and scrolls on its own when taller than the window, so nothing is cut off. */
+.sidebar { display: flex; flex-direction: column; gap: 20px; position: sticky; top: 78px; max-height: calc(100dvh - 98px); overflow-y: auto; padding-bottom: 2px; scrollbar-width: thin; }
+@media (max-width: 900px) { .sidebar { position: static; max-height: none; overflow: visible; } }
 
 .composer { padding: 14px; display: flex; gap: 10px; align-items: flex-end; border-bottom: 1px solid var(--line); }
 .composer textarea { flex: 1; resize: none; height: 36px; min-height: 36px; max-height: 160px; line-height: 1.45; padding: 7px 12px; }
@@ -212,5 +211,51 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .msg-image.placeholder { width: 240px; height: 160px; }
 .file-chip { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; font-size: 13px; background: var(--bg-tint); }
 .file-chip:hover { border-color: var(--line-strong); }
-.check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text-2); padding: 0 6px; cursor: pointer; white-space: nowrap; }
-.check input { height: auto; width: auto; margin: 0; accent-color: var(--accent); }
+
+/* Base UI parts */
+.backdrop { position: fixed; inset: 0; min-height: 100dvh; background: rgb(15 12 10 / 0.42); backdrop-filter: blur(2px); transition: opacity 160ms; z-index: 40; }
+.backdrop[data-starting-style], .backdrop[data-ending-style] { opacity: 0; }
+.dialog {
+  position: fixed; top: 50%; left: 50%; z-index: 41; transform: translate(-50%, -50%);
+  width: 440px; max-width: calc(100vw - 32px); max-height: calc(100dvh - 48px); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 16px; padding: 22px;
+  background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 16px;
+  box-shadow: 0 24px 64px rgb(0 0 0 / 0.28);
+  transition: transform 160ms cubic-bezier(0.2, 0.9, 0.3, 1), opacity 160ms;
+}
+.dialog[data-starting-style], .dialog[data-ending-style] { opacity: 0; transform: translate(-50%, -48%) scale(0.98); }
+.dialog-title { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: -0.01em; text-transform: none; color: var(--text); }
+.dialog-description { margin: -8px 0 0; color: var(--text-2); font-size: 14px; line-height: 1.55; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+button.danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; }
+button.danger-solid:hover { filter: brightness(1.08); border-color: var(--danger); }
+
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field-label { font-size: 13.5px; font-weight: 500; }
+.field-control { width: 100%; }
+.field-description { color: var(--muted); font-size: 13px; line-height: 1.45; }
+.field-error { color: var(--danger); font-size: 13px; }
+.field[data-invalid] .field-control { border-color: var(--danger); }
+
+.toggle-field { border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; background: var(--bg); }
+.toggle-label { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; }
+.toggle-text { display: flex; flex-direction: column; gap: 3px; }
+.toggle-title { display: inline-flex; align-items: center; gap: 7px; font-size: 14px; font-weight: 500; }
+.toggle-title svg { color: var(--accent); }
+.switch { position: relative; flex: none; width: 38px; height: 22px; padding: 2px; border-radius: 99px; border: 0; background: var(--line-strong); transition: background 150ms; cursor: pointer; }
+.switch[data-checked] { background: var(--accent); }
+.switch:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.switch-thumb { display: block; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgb(0 0 0 / 0.25); transition: translate 150ms; }
+.switch-thumb[data-checked] { translate: 16px 0; }
+
+.tooltip { padding: 5px 9px; border-radius: 7px; background: var(--text); color: var(--bg); font-size: 12.5px; font-weight: 500; transition: opacity 120ms; z-index: 50; }
+.tooltip[data-starting-style], .tooltip[data-ending-style] { opacity: 0; }
+
+.menu { min-width: 200px; padding: 5px; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 12px 32px rgb(0 0 0 / 0.18); outline: none; transform-origin: var(--transform-origin); transition: opacity 120ms, transform 120ms; z-index: 30; }
+.menu[data-starting-style], .menu[data-ending-style] { opacity: 0; transform: scale(0.97); }
+.menu-item { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 8px; font-size: 14px; cursor: default; outline: none; user-select: none; }
+.menu-item[data-highlighted] { background: var(--bg-tint); }
+.menu-item.danger { color: var(--danger); }
+.menu-item.danger[data-highlighted] { background: color-mix(in oklab, var(--danger) 10%, transparent); }
+.menu-separator { height: 1px; margin: 5px 4px; background: var(--line); }
+.dialog-form { display: flex; flex-direction: column; gap: 16px; }

@@ -137,6 +137,17 @@ export async function renameChannel(env: Env, userId: string, ref: string, name:
   return { ...channel, name: clean }
 }
 
+// Turns a plain channel end-to-end encrypted; there is no way back. Earlier
+// messages stay as they were (readable by the server) unless cleared.
+export async function encryptChannel(env: Env, userId: string, ref: string, clearHistory = false) {
+  const channel = await channelFor(env, userId, ref, true)
+  if (channel.encrypted) throw new UserError(400, `"${channel.name}" is already end-to-end encrypted.`)
+  await env.DB.prepare(`UPDATE channels SET encrypted = 1 WHERE id = ?`).bind(channel.id).run()
+  if (clearHistory) await roomCall(env, channel.id, '/purge', { method: 'POST' })
+  await roomCall(env, channel.id, '/notify', { method: 'POST' })
+  return { ...channel, encrypted: 1, clearedHistory: clearHistory }
+}
+
 export async function deleteChannel(env: Env, userId: string, ref: string) {
   const channel = await channelFor(env, userId, ref, true)
   await env.DB.prepare(`DELETE FROM channels WHERE id = ?`).bind(channel.id).run()

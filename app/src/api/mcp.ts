@@ -75,6 +75,14 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
     input: z.object({ channel: CHANNEL, name: z.string() }),
     run: (env, p, a) => data.renameChannel(env, p.userId, a.channel, a.name),
   }),
+  encrypt_channel: tool({
+    description:
+      "Turn a plain channel you own end-to-end encrypted (there's no way back). Members' devices then need approving. " +
+      'Earlier messages stay unencrypted unless clear_history is set, which deletes them.',
+    input: z.object({ channel: CHANNEL, clear_history: z.boolean().optional().describe('Delete the existing unencrypted messages') }),
+    destructive: true,
+    run: (env, p, a) => data.encryptChannel(env, p.userId, a.channel, a.clear_history ?? false),
+  }),
   delete_channel: tool({
     description: 'Delete a channel you own, with its history, invites and connections. Cannot be undone.',
     input: z.object({ channel: CHANNEL }),

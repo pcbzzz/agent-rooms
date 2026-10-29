@@ -141,7 +141,7 @@ export const decisionFor = (channelId: string, deviceId: string) => trust[`${cha
 // --- messages and files -------------------------------------------------------------
 
 export type Opened =
-  | { status: 'ok'; payload: Payload }
+  | { status: 'ok'; payload: Payload; plain?: true }
   | { status: 'locked' | 'not-for-me' | 'unapproved' | 'invalid' | 'plain'; device?: string; text?: string }
 
 export async function openMessage(channelId: string, text: string): Promise<Opened> {
@@ -149,7 +149,7 @@ export async function openMessage(channelId: string, text: string): Promise<Open
   try {
     const parsed = JSON.parse(text) as { v?: number }
     // A plain channel's message.
-    if (parsed?.v === 0) return { status: 'ok', payload: parsed as Payload }
+    if (parsed?.v === 0) return { status: 'ok', payload: parsed as Payload, plain: true }
     if (parsed?.v !== 1) throw new Error()
     envelope = parsed as core.Envelope
   } catch {

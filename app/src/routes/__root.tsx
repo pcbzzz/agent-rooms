@@ -3,6 +3,7 @@ import { HeadContent, Link, Outlet, Scripts, createRootRoute } from '@tanstack/r
 import type { ReactNode } from 'react'
 
 import { useApi, type User } from '../lib/api'
+import { TooltipProvider } from '../lib/base'
 import { Avatar } from '../lib/ui'
 import css from '../styles.css?url'
 
@@ -55,7 +56,7 @@ function Document({ children }: { children: ReactNode }) {
         <HeadContent />
       </head>
       <body>
-        {children}
+        <TooltipProvider delay={300}>{children}</TooltipProvider>
         <Scripts />
       </body>
     </html>

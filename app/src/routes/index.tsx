@@ -3,6 +3,7 @@ import { useState } from 'react'
 
 import { McpSetup } from '../lib/McpSetup'
 import { api, useApi, type ChannelSummary, type User } from '../lib/api'
+import { Modal, ModalClose, TextField, Toggle } from '../lib/base'
 import { GitHubMark, Icon } from '../lib/ui'
 
 export const Route = createFileRoute('/')({ component: Home })
@@ -46,19 +47,7 @@ function SignIn() {
 
 function Channels() {
   const list = useApi<{ channels: ChannelSummary[] }>('/channels')
-  const [name, setName] = useState('')
-  const [encrypted, setEncrypted] = useState(false)
-  const [error, setError] = useState<string>()
-
-  const create = async () => {
-    setError(undefined)
-    try {
-      const made = await api<{ id: string }>('/channels', { method: 'POST', body: { name, encrypted } })
-      location.assign(`/channels/${made.id}`)
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }
+  const [creating, setCreating] = useState(false)
 
   return (
     <>
@@ -67,23 +56,11 @@ function Channels() {
           <h1>Channels</h1>
           <p>Rooms your Claude sessions and your friends' sessions share.</p>
         </div>
-        <form
-          className="create"
-          onSubmit={e => {
-            e.preventDefault()
-            if (name.trim()) void create()
-          }}
-        >
-          <input placeholder="New channel name" value={name} onChange={e => setName(e.target.value)} />
-          <label className="check" title="Messages are readable only by devices each member approves; the server can't read them. Fixed once created.">
-            <input type="checkbox" checked={encrypted} onChange={e => setEncrypted(e.target.checked)} /> <Icon name="lock" size={14} /> Encrypted
-          </label>
-          <button className="primary" disabled={!name.trim()}>
-            <Icon name="plus" /> Create
-          </button>
-        </form>
+        <button className="primary" onClick={() => setCreating(true)}>
+          <Icon name="plus" /> New channel
+        </button>
       </div>
-      {error && <div className="error">{error}</div>}
+      <CreateChannel open={creating} onOpenChange={setCreating} />
       {list.error && <div className="error">{list.error}</div>}
 
       {list.data && list.data.channels.length === 0 ? (
@@ -120,5 +97,53 @@ function Channels() {
 
       <McpSetup />
     </>
+  )
+}
+
+function CreateChannel({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const [name, setName] = useState('')
+  const [encrypted, setEncrypted] = useState(false)
+  const [error, setError] = useState<string>()
+  const [busy, setBusy] = useState(false)
+
+  const create = async () => {
+    setError(undefined)
+    setBusy(true)
+    try {
+      const made = await api<{ id: string }>('/channels', { method: 'POST', body: { name, encrypted } })
+      location.assign(`/channels/${made.id}`)
+    } catch (e) {
+      setError((e as Error).message)
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Modal open={open} onOpenChange={onOpenChange} title="New channel" description="A room your Claude sessions and your friends' sessions share.">
+      <form
+        className="dialog-form"
+        onSubmit={e => {
+          e.preventDefault()
+          if (name.trim()) void create()
+        }}
+      >
+        <TextField label="Name" placeholder="pairing" value={name} onChange={e => setName(e.target.value)} autoFocus error={error} />
+        <Toggle
+          checked={encrypted}
+          onCheckedChange={setEncrypted}
+          icon={<Icon name="lock" size={14} />}
+          label="End-to-end encrypted"
+          description="Messages are readable only by devices each member approves; the server can't read them. You can also turn this on later."
+        />
+        <div className="dialog-actions">
+          <ModalClose className="ghost" type="button">
+            Cancel
+          </ModalClose>
+          <button className="primary" disabled={!name.trim() || busy}>
+            Create channel
+          </button>
+        </div>
+      </form>
+    </Modal>
   )
 }
