@@ -82,6 +82,10 @@ export class Room extends DurableObject<Env> {
       // reconnect keeps the one it had) and close any earlier socket.
       case 'POST /register':
         return json({ cursor: this.cursorOf(member), closed: this.close(member, 4002, 'replaced by a new session') })
+      // A session without a device key in a channel that just became encrypted:
+      // close its socket until it registers one. Its cursor stays.
+      case 'POST /require-device':
+        return json({ closed: this.close(member, 4003, 'device key required') })
       // The name was disconnected or its owner removed: forget it.
       case 'POST /forget':
         this.sql.exec(`DELETE FROM cursors WHERE member = ?`, member)

@@ -19,6 +19,7 @@ function world(
     trust?: Record<string, { decision: string }>
     answer?: string
     encrypted?: boolean | { encrypted: boolean }
+    keyless?: boolean
   } = {},
 ) {
   const sent: Sent[] = []
@@ -28,6 +29,7 @@ function world(
   const asked: string[] = []
   const trust: Record<string, { decision: string }> = { ...(opts.trust ?? { 'dev-bob': { decision: 'approved' } }) }
   let pending = [...(opts.inbox ?? [])]
+  const keyless = { value: opts.keyless ?? false }
 
   mock.store(on, opts.stored ?? {})
   mock.clock(on, { now: 1_000_000 })
@@ -71,6 +73,10 @@ function world(
     }
 
     sent.push({ method, path: url.pathname, body })
+    // A connection with no device key in an encrypted channel may only register one.
+    if (url.pathname === '/c/device') return (keyless.value = false), reply({ device: body.device.id })
+    if (keyless.value && url.pathname.startsWith('/c/') && !url.pathname.startsWith('/c/claim/'))
+      return reply({ error: 'This channel is end-to-end encrypted: register this device first.', code: 'device_required' }, 403)
     const encrypted = typeof opts.encrypted === 'object' ? opts.encrypted.encrypted : (opts.encrypted ?? true)
     if (url.pathname === '/c/claim/abc123') return reply({ token: 'crt_tok', channelId: 'ch1', channel: 'pairing', member: 'alice', url: URL, encrypted })
     if (url.pathname === '/c/members')
@@ -303,4 +309,18 @@ test('a send that races the channel turning encrypted is sent encrypted', async 
   expect(await $.session.send({ to: 'room:*', text: 'hello after the switch' } as never)).toEqual({ isDelivered: true })
   // Refused as plain text, then sent again encrypted to the approved device.
   expect(w.helperCalls.find(c => c.path === '/seal')?.body).toMatchObject({ text: 'hello after the switch', recipients: [{ id: 'dev-bob' }] })
+})
+
+test('a session without a device key in an encrypted channel registers one, then carries on', async ($, on) => {
+  const saved = { url: URL, token: 'crt_tok', channel: 'pairing', channelId: 'ch1', member: 'alice', encrypted: false }
+  const w = world(on, {
+    stored: { 'config:sess-1': saved },
+    keyless: true,
+    inbox: [{ seq: 1, id: 'm1', from: 'bob.mac-111111', to: null, text: sealed('dev-bob', 'welcome back'), sentAt: 1 }],
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await settle(() => w.submitted.length > 0)
+
+  expect(w.sent.find(s => s.path === '/c/device')?.body).toEqual({ device: ME })
+  expect(w.submitted[0]).toContain('welcome back')
 })

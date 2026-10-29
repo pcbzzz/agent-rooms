@@ -223,6 +223,13 @@ function connectSocket() {
   socket.addEventListener('close', ({ code }) => {
     clearInterval(ping)
     if (ws !== socket) return
+    // The channel became encrypted and this connection has no device key yet: the
+    // plugin registers one, then asks for the socket again.
+    if (code === 4003) {
+      emit({ type: 'status', state: 'device-required' })
+      wsTarget = undefined
+      return
+    }
     // 4001: disconnected; 4002: another session took this name; 4000: channel deleted.
     if (code === 4000 || code === 4001 || code === 4002) {
       emit({ type: 'status', state: 'revoked', code })

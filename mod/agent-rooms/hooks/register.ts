@@ -68,6 +68,7 @@ let helperWaiters: ((d: Device | undefined) => void)[] = []
 let devices: ChannelDevice[] = []
 let trust: Record<string, Decision> = {}
 let reviewing = false
+let registering: Promise<boolean> | undefined
 const later = new Map<string, number>()
 
 const configKey = () => `config:${sessionId}`
@@ -337,6 +338,11 @@ async function onHelperEvent($: EngineInterface, line: string) {
     if (event.online.some(name => !members.some(m => m.name === name))) void refreshMembers($)
     void reviewDevices($)
   }
+  if (event.type === 'status' && event.state === 'device-required') {
+    socketState = 'closed'
+    if (await registerDevice($)) await openSocket($)
+    return showStatus($)
+  }
   if (event.type === 'status') {
     socketState = event.state === 'open' ? 'open' : event.state === 'revoked' ? 'revoked' : 'closed'
     if (event.state === 'revoked') {
@@ -464,6 +470,36 @@ function connect($: EngineInterface) {
 }
 
 // --- devices and approval ---------------------------------------------------------
+
+// An encrypted channel requires this machine's device key before anything else.
+// Registers it; when there is no helper to hold one, leaves the channel rather
+// than staying connected without a key.
+function registerDevice($: EngineInterface): Promise<boolean> {
+  registering ??= (async () => {
+    const c = config
+    if (!c) return false
+    const me = await helperDevice($)
+    if (!me) {
+      $.ui.toast(`agent-rooms: "${c.channel}" is end-to-end encrypted, and this machine can't hold a device key (the helper needs Node 22+ or Bun). Disconnected.`)
+      await disconnect($)
+      return false
+    }
+    const done = await call($, c, 'POST', 'device', { device: me })
+    if (!done.ok) {
+      $.ui.toast(`agent-rooms: couldn't register this device with "${c.channel}" (${done.error}). Disconnected.`)
+      await disconnect($)
+      return false
+    }
+    config = { ...c, encrypted: true }
+    await remember($, config)
+    void reviewDevices($)
+    void pull($)
+    return true
+  })().finally(() => {
+    registering = undefined
+  })
+  return registering
+}
 
 async function refreshDevices($: EngineInterface) {
   if (!config) return
@@ -775,7 +811,7 @@ async function call(
   $: EngineInterface,
   c: Config,
   method: 'GET' | 'POST' | 'PUT',
-  path: 'messages' | 'ack' | 'members' | 'leave' | 'devices',
+  path: 'messages' | 'ack' | 'members' | 'leave' | 'devices' | 'device',
   body?: unknown,
 ): Promise<{ ok: true; body: unknown } | { ok: false; status: number; error: string }> {
   try {
@@ -784,8 +820,12 @@ async function call(
       headers: { Authorization: `Bearer ${c.token}`, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     })
-    const parsed: unknown = res.text ? JSON.parse(res.text) : {}
-    if (!res.ok) return { ok: false, status: res.status, error: (parsed as { error?: string }).error ?? `HTTP ${res.status}` }
+    const parsed = (res.text ? JSON.parse(res.text) : {}) as { error?: string; code?: string }
+    if (!res.ok) {
+      // The channel is encrypted and this connection has no device key yet.
+      if (res.status === 403 && parsed.code === 'device_required' && path !== 'device') void registerDevice($)
+      return { ok: false, status: res.status, error: parsed.error ?? `HTTP ${res.status}` }
+    }
     return { ok: true, body: parsed }
   } catch (error) {
     return { ok: false, status: 0, error: String(error) }

@@ -144,6 +144,11 @@ export async function encryptChannel(env: Env, userId: string, ref: string, clea
   if (channel.encrypted) throw new UserError(400, `"${channel.name}" is already end-to-end encrypted.`)
   await env.DB.prepare(`UPDATE channels SET encrypted = 1 WHERE id = ?`).bind(channel.id).run()
   if (clearHistory) await roomCall(env, channel.id, '/purge', { method: 'POST' })
+  // Sessions without a device key are cut off until they register one.
+  const keyless = await env.DB.prepare(`SELECT member FROM connections WHERE channel_id = ? AND token_hash IS NOT NULL AND device_id IS NULL`)
+    .bind(channel.id)
+    .all<{ member: string }>()
+  await Promise.all(keyless.results.map(k => roomCall(env, channel.id, '/require-device', { method: 'POST', member: k.member })))
   await roomCall(env, channel.id, '/notify', { method: 'POST' })
   return { ...channel, encrypted: 1, clearedHistory: clearHistory }
 }
@@ -283,6 +288,8 @@ export async function claimConnection(env: Env, claim: string, session: string, 
     .first<{ channel_id: string; user_id: string; expires_at: number; channel_name: string; encrypted: number; login: string }>()
   await env.DB.prepare(`DELETE FROM claims WHERE hash = ? OR expires_at < ?`).bind(hash, now()).run()
   if (!row || row.expires_at < now()) throw new UserError(400, 'This connect code is invalid, used or expired; make a new one.')
+  if (row.encrypted && !device)
+    throw new UserError(400, 'This channel is end-to-end encrypted: joining it needs a device key. Update the agent-rooms plugin (0.2.2 or later).')
 
   let member = `${row.login}.${session}`
   const token = `crt_${randomId(24)}`
@@ -320,6 +327,17 @@ export async function claimConnection(env: Env, claim: string, session: string, 
   }
   await roomCall(env, row.channel_id, '/register', { method: 'POST', member })
   return { token, channelId: row.channel_id, channel: row.channel_name, member, encrypted: !!row.encrypted }
+}
+
+// A connected session registers its device after the fact: what an encrypted
+// channel demands before anything else.
+export async function attachDevice(env: Env, conn: { id: string; channel_id: string; user_id: string }, device: DeviceKeys) {
+  await registerDevice(env, conn.user_id, { ...device, kind: 'cli' })
+  await env.DB.batch([
+    env.DB.prepare(`UPDATE connections SET device_id = ? WHERE id = ?`).bind(device.id, conn.id),
+    env.DB.prepare(`INSERT INTO channel_devices (channel_id, device_id, added_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`).bind(conn.channel_id, device.id, now()),
+  ])
+  return { device: device.id }
 }
 
 // --- devices ------------------------------------------------------------------

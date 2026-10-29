@@ -147,8 +147,17 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
     const protocol = c.req.header('Sec-WebSocket-Protocol')?.split(',').map(p => p.trim()).find(p => p.startsWith('crt_'))
     const conn = await data.connectionByToken(c.env, header ?? protocol ?? '')
     if (!conn) return c.json({ error: 'This session was disconnected. Connect it again.' }, 401)
+    // An encrypted channel lets a session without a device key do one thing: register it.
+    if (conn.encrypted && !conn.device_id && c.req.path !== '/c/device')
+      return c.json({ error: 'This channel is end-to-end encrypted: register this device first.', code: 'device_required' }, 403)
     c.set('conn', conn)
     await next()
+  })
+  session.post('/device', async c => {
+    const conn = c.get('conn')
+    const { device } = await c.req.json<{ device?: data.DeviceKeys }>().catch(() => ({ device: undefined }))
+    if (!device) throw new data.UserError(400, 'device required')
+    return c.json(await data.attachDevice(c.env, conn, device))
   })
   const forward = (path: string) => async (c: Context<any>) => {
     const conn = c.get('conn')
