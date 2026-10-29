@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
 
 export type User = { id: string; login: string; name: string | null; avatar_url: string | null }
-export type ChannelSummary = { id: string; name: string; role: 'owner' | 'member'; member_count: number; connection_count: number; created_at: number }
+export type ChannelSummary = { id: string; name: string; role: 'owner' | 'member'; encrypted: number; member_count: number; connection_count: number; created_at: number }
 export type ChannelDetail = {
-  channel: { id: string; name: string; role: 'owner' | 'member'; owner_id: string }
+  channel: { id: string; name: string; role: 'owner' | 'member'; owner_id: string; encrypted: number }
   members: (User & { role: string })[]
   connections: { id: string; member: string; login: string; isOnline: boolean; last_seen_at: number | null }[]
   invites: { code: string; max_uses: number | null; uses: number; expires_at: number | null }[]

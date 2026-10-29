@@ -1,6 +1,7 @@
 // Every channel operation, shared by the web API and the MCP tools so both
 // enforce the same rules. Each takes the acting user's id.
 
+import { deviceId } from '../../../mod/agent-rooms/helper/crypto-core.mjs'
 import type { RoomMessage } from '../room'
 
 export class UserError extends Error {
@@ -13,7 +14,7 @@ export class UserError extends Error {
 }
 
 export type User = { id: string; login: string; name: string | null; avatar_url: string | null }
-export type Channel = { id: string; name: string; owner_id: string; created_at: number; role: 'owner' | 'member' }
+export type Channel = { id: string; name: string; owner_id: string; created_at: number; role: 'owner' | 'member'; encrypted: number }
 
 const CHANNEL_NAME = /^[\w .'-]{1,48}$/u
 const SESSION = /^[a-z0-9][a-z0-9-]{0,39}$/
@@ -87,7 +88,7 @@ async function userByLogin(env: Env, login: string): Promise<User> {
 
 export function listChannels(env: Env, userId: string) {
   return env.DB.prepare(
-    `SELECT c.id, c.name, c.owner_id, c.created_at, m.role,
+    `SELECT c.id, c.name, c.owner_id, c.created_at, c.encrypted, m.role,
             (SELECT COUNT(*) FROM channel_members WHERE channel_id = c.id) AS member_count,
             (SELECT COUNT(*) FROM connections WHERE channel_id = c.id AND token_hash IS NOT NULL) AS connection_count
      FROM channels c JOIN channel_members m ON m.channel_id = c.id AND m.user_id = ?
@@ -101,7 +102,7 @@ export function listChannels(env: Env, userId: string) {
 // Resolves a channel by id, or by name among the user's channels.
 export async function channelFor(env: Env, userId: string, ref: string, needOwner = false): Promise<Channel> {
   const rows = await env.DB.prepare(
-    `SELECT c.id, c.name, c.owner_id, c.created_at, m.role
+    `SELECT c.id, c.name, c.owner_id, c.created_at, c.encrypted, m.role
      FROM channels c JOIN channel_members m ON m.channel_id = c.id AND m.user_id = ?
      WHERE c.id = ? OR lower(c.name) = lower(?)`,
   )
@@ -114,13 +115,15 @@ export async function channelFor(env: Env, userId: string, ref: string, needOwne
   return channel
 }
 
-export async function createChannel(env: Env, userId: string, name: string) {
+// `encrypted`: messages are end-to-end encrypted between approved devices,
+// and the server can't read them. Chosen when the channel is made.
+export async function createChannel(env: Env, userId: string, name: string, encrypted = false) {
   const clean = name.trim()
   if (!CHANNEL_NAME.test(clean)) throw new UserError(400, 'Channel names are 1-48 letters, digits, spaces, . \' - or _.')
   const id = randomId(8)
   const at = now()
   await env.DB.batch([
-    env.DB.prepare(`INSERT INTO channels (id, name, owner_id, created_at) VALUES (?, ?, ?, ?)`).bind(id, clean, userId, at),
+    env.DB.prepare(`INSERT INTO channels (id, name, owner_id, created_at, encrypted) VALUES (?, ?, ?, ?, ?)`).bind(id, clean, userId, at, encrypted ? 1 : 0),
     env.DB.prepare(`INSERT INTO channel_members (channel_id, user_id, role, added_at) VALUES (?, ?, 'owner', ?)`).bind(id, userId, at),
   ])
   return channelFor(env, userId, id)
@@ -258,15 +261,15 @@ export async function createClaim(env: Env, userId: string, ref: string) {
 
 // The session's side: the code becomes that session's own connection, named
 // <login>.<session>. The same session connecting again takes its name back.
-export async function claimConnection(env: Env, claim: string, session: string) {
+export async function claimConnection(env: Env, claim: string, session: string, device?: DeviceKeys) {
   if (!SESSION.test(session)) throw new UserError(400, 'The session name must be 1-40 lowercase letters, digits or -.')
   const hash = await sha256(claim)
   const row = await env.DB.prepare(
-    `SELECT k.channel_id, k.user_id, k.expires_at, c.name AS channel_name, u.login
+    `SELECT k.channel_id, k.user_id, k.expires_at, c.name AS channel_name, c.encrypted, u.login
      FROM claims k JOIN channels c ON c.id = k.channel_id JOIN users u ON u.id = k.user_id WHERE k.hash = ?`,
   )
     .bind(hash)
-    .first<{ channel_id: string; user_id: string; expires_at: number; channel_name: string; login: string }>()
+    .first<{ channel_id: string; user_id: string; expires_at: number; channel_name: string; encrypted: number; login: string }>()
   await env.DB.prepare(`DELETE FROM claims WHERE hash = ? OR expires_at < ?`).bind(hash, now()).run()
   if (!row || row.expires_at < now()) throw new UserError(400, 'This connect code is invalid, used or expired; make a new one.')
 
@@ -296,8 +299,103 @@ export async function claimConnection(env: Env, claim: string, session: string) 
   )
     .bind(previous?.id ?? randomId(), row.channel_id, row.user_id, member, await sha256(token), now(), now())
     .run()
+  // The session's device: its keys are what other members approve.
+  if (device) {
+    await registerDevice(env, row.user_id, { ...device, kind: 'cli' })
+    await env.DB.batch([
+      env.DB.prepare(`UPDATE connections SET device_id = ? WHERE channel_id = ? AND member = ?`).bind(device.id, row.channel_id, member),
+      env.DB.prepare(`INSERT INTO channel_devices (channel_id, device_id, added_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`).bind(row.channel_id, device.id, now()),
+    ])
+  }
   await roomCall(env, row.channel_id, '/register', { method: 'POST', member })
-  return { token, channelId: row.channel_id, channel: row.channel_name, member }
+  return { token, channelId: row.channel_id, channel: row.channel_name, member, encrypted: !!row.encrypted }
+}
+
+// --- devices ------------------------------------------------------------------
+// A device is a key pair (signing + encryption) on one machine or browser. The
+// server only lists them: which devices may read a message is each sender's
+// own decision, made by encrypting to the devices that sender approved.
+
+export type DeviceKeys = { id: string; signPub: string; encPub: string; label?: string }
+const KEY = /^[A-Za-z0-9_-]{43}$/
+
+export async function registerDevice(env: Env, userId: string, d: DeviceKeys & { kind: 'cli' | 'browser' }) {
+  if (!KEY.test(d.signPub) || !KEY.test(d.encPub) || d.id !== (await deviceId(d.signPub, d.encPub)))
+    throw new UserError(400, "The device's id does not match its keys.")
+  const owner = await env.DB.prepare(`SELECT user_id FROM devices WHERE id = ?`).bind(d.id).first<{ user_id: string }>()
+  if (owner && owner.user_id !== userId) throw new UserError(409, 'That device belongs to someone else.')
+  const label = (d.label ?? (d.kind === 'browser' ? 'Browser' : 'Device')).slice(0, 48)
+  await env.DB.prepare(
+    `INSERT INTO devices (id, user_id, kind, label, sign_pub, enc_pub, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET label = excluded.label`,
+  )
+    .bind(d.id, userId, d.kind, label, d.signPub, d.encPub, now())
+    .run()
+  return { id: d.id }
+}
+
+export async function addChannelDevice(env: Env, userId: string, ref: string, deviceIdValue: string) {
+  const channel = await channelFor(env, userId, ref)
+  const mine = await env.DB.prepare(`SELECT 1 FROM devices WHERE id = ? AND user_id = ?`).bind(deviceIdValue, userId).first()
+  if (!mine) throw new UserError(404, 'No such device of yours.')
+  await env.DB.prepare(`INSERT INTO channel_devices (channel_id, device_id, added_at) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`).bind(channel.id, deviceIdValue, now()).run()
+  return { ok: true }
+}
+
+// Every device in a channel, with its owner and the sessions running on it.
+export async function channelDevices(env: Env, channelId: string) {
+  const [devices, sessions, presence] = await Promise.all([
+    env.DB.prepare(
+      `SELECT d.id, d.kind, d.label, d.sign_pub AS signPub, d.enc_pub AS encPub, u.login FROM channel_devices cd
+       JOIN devices d ON d.id = cd.device_id JOIN users u ON u.id = d.user_id
+       JOIN channel_members m ON m.channel_id = cd.channel_id AND m.user_id = d.user_id
+       WHERE cd.channel_id = ? ORDER BY u.login, d.label`,
+    )
+      .bind(channelId)
+      .all<{ id: string; kind: string; label: string; signPub: string; encPub: string; login: string }>(),
+    env.DB.prepare(`SELECT member, device_id FROM connections WHERE channel_id = ? AND token_hash IS NOT NULL AND device_id IS NOT NULL`)
+      .bind(channelId)
+      .all<{ member: string; device_id: string }>(),
+    roomCall<{ online: string[] }>(env, channelId, '/presence'),
+  ])
+  return devices.results.map(d => {
+    const own = sessions.results.filter(k => k.device_id === d.id).map(k => k.member)
+    return { ...d, sessions: own, isOnline: own.some(m => presence.online.includes(m)) }
+  })
+}
+
+export async function channelDevicesFor(env: Env, userId: string, ref: string) {
+  const channel = await channelFor(env, userId, ref)
+  return { devices: await channelDevices(env, channel.id) }
+}
+
+// A browser device's approved-device list, encrypted by that browser.
+export async function deviceState(env: Env, userId: string, id: string, blob?: string) {
+  const mine = await env.DB.prepare(`SELECT state FROM devices WHERE id = ? AND user_id = ?`).bind(id, userId).first<{ state: string | null }>()
+  if (!mine) throw new UserError(404, 'No such device of yours.')
+  if (blob === undefined) return { state: mine.state }
+  if (blob.length > 500_000) throw new UserError(400, 'Too large.')
+  await env.DB.prepare(`UPDATE devices SET state = ? WHERE id = ?`).bind(blob, id).run()
+  return { ok: true }
+}
+
+// --- files ------------------------------------------------------------------------
+// Stored encrypted: the key travels inside the message, never here.
+
+const MAX_FILE = 10 * 1024 * 1024 + 64
+
+export async function putFile(env: Env, channelId: string, body: ArrayBuffer) {
+  if (body.byteLength === 0 || body.byteLength > MAX_FILE) throw new UserError(400, 'Files are up to 10 MB.')
+  const id = randomId(18)
+  await env.FILES.put(`${channelId}/${id}`, body)
+  return { id }
+}
+
+export async function getFile(env: Env, channelId: string, id: string) {
+  if (!/^[\w-]{1,64}$/.test(id)) throw new UserError(400, 'Bad file id.')
+  const object = await env.FILES.get(`${channelId}/${id}`)
+  if (!object) throw new UserError(404, 'No such file.')
+  return new Response(object.body, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'private, max-age=86400' } })
 }
 
 // Who a message in the channel may be addressed to: a connected session, or
@@ -315,13 +413,13 @@ export async function checkRecipient(env: Env, channelId: string, to: string | n
 
 export async function connectionByToken(env: Env, token: string) {
   const row = await env.DB.prepare(
-    `SELECT k.id, k.channel_id, k.member, k.user_id, c.name AS channel_name FROM connections k
+    `SELECT k.id, k.channel_id, k.member, k.user_id, k.device_id, c.name AS channel_name, c.encrypted FROM connections k
      JOIN channels c ON c.id = k.channel_id
      JOIN channel_members m ON m.channel_id = k.channel_id AND m.user_id = k.user_id
      WHERE k.token_hash = ?`,
   )
     .bind(await sha256(token))
-    .first<{ id: string; channel_id: string; member: string; user_id: string; channel_name: string }>()
+    .first<{ id: string; channel_id: string; member: string; user_id: string; device_id: string | null; channel_name: string; encrypted: number }>()
   if (row) await env.DB.prepare(`UPDATE connections SET last_seen_at = ? WHERE id = ?`).bind(now(), row.id).run()
   return row
 }
@@ -348,6 +446,33 @@ export async function deleteConnection(env: Env, userId: string, connectionId: s
 }
 
 // --- messages ----------------------------------------------------------------
+// An encrypted channel stores envelopes the server can't read. A plain one
+// stores `{ v: 0, text, files }` (older plain messages are bare text).
+
+export type Envelope = { v: 1; from: string; eph: string; iv: string; ct: string; keys: { to: string; iv: string; wk: string }[]; sig: string }
+export type PlainFile = { id: string; name: string; type: string; size: number }
+
+export function checkEnvelope(envelope: unknown, deviceIdValue: string): Envelope {
+  const e = envelope as Partial<Envelope> | undefined
+  if (!e || e.v !== 1 || typeof e.ct !== 'string' || typeof e.sig !== 'string' || !Array.isArray(e.keys)) throw new UserError(400, 'This channel is end-to-end encrypted: send an encrypted envelope.')
+  if (e.from !== deviceIdValue) throw new UserError(400, 'The envelope is not from this device.')
+  return e as Envelope
+}
+
+// The stored form of a message: an envelope in an encrypted channel, text and files in a plain one.
+export function messageBody(channel: { encrypted: number }, body: { text?: unknown; files?: unknown; envelope?: unknown }, device: string | null | undefined): string {
+  if (channel.encrypted) {
+    if (!device) throw new UserError(400, 'Update the agent-rooms plugin: this channel is end-to-end encrypted.')
+    return JSON.stringify(checkEnvelope(body.envelope, device))
+  }
+  if (body.envelope !== undefined) throw new UserError(400, 'This channel is not encrypted; send text.')
+  const text = typeof body.text === 'string' ? body.text : ''
+  const files = Array.isArray(body.files) ? (body.files as PlainFile[]) : []
+  if (!text.trim() && files.length === 0) throw new UserError(400, 'text required')
+  if (files.length > 10 || files.some(f => typeof f?.id !== 'string' || typeof f.name !== 'string' || typeof f.type !== 'string' || typeof f.size !== 'number'))
+    throw new UserError(400, 'Bad attachments.')
+  return JSON.stringify({ v: 0, text, files: files.map(f => ({ id: f.id, name: f.name.slice(0, 200), type: f.type.slice(0, 100), size: f.size })) })
+}
 
 export async function readMessages(env: Env, userId: string, ref: string, limit = 30) {
   const channel = await channelFor(env, userId, ref)
@@ -355,9 +480,15 @@ export async function readMessages(env: Env, userId: string, ref: string, limit 
   return { channel, messages }
 }
 
-// Posts as the user themself (their login), from the website or MCP.
-export async function postMessage(env: Env, userId: string, ref: string, text: string, to?: string) {
+// Posts from the website or MCP, as the person (their login). In an encrypted
+// channel it must come signed by one of their browser devices.
+export async function postMessage(env: Env, userId: string, ref: string, body: { text?: unknown; files?: unknown; envelope?: unknown; device?: string }, to?: string) {
   const channel = await channelFor(env, userId, ref)
+  if (channel.encrypted) {
+    const mine = await env.DB.prepare(`SELECT 1 FROM devices WHERE id = ? AND user_id = ?`).bind(body.device ?? '', userId).first()
+    if (!mine) throw new UserError(400, 'This channel is end-to-end encrypted: post from an unlocked browser.')
+  }
+  const text = messageBody(channel, body, body.device)
   await checkRecipient(env, channel.id, to)
   const user = (await getUser(env, userId))!
   const sent = await roomCall<{ seq: number }>(env, channel.id, '/messages', {

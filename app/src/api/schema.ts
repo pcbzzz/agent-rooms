@@ -19,6 +19,7 @@ const STATEMENTS = [
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    encrypted INTEGER NOT NULL DEFAULT 0,
     created_at INTEGER NOT NULL
   )`,
   `CREATE TABLE IF NOT EXISTS channel_members (
@@ -51,20 +52,43 @@ const STATEMENTS = [
     user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     member TEXT NOT NULL,
     token_hash TEXT UNIQUE,
+    device_id TEXT,
     created_at INTEGER NOT NULL,
     last_seen_at INTEGER,
     UNIQUE (channel_id, member)
+  )`,
+  // A key pair on one machine (cli) or browser; `state` is a browser's own encrypted approved list.
+  `CREATE TABLE IF NOT EXISTS devices (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL CHECK (kind IN ('cli', 'browser')),
+    label TEXT NOT NULL,
+    sign_pub TEXT NOT NULL,
+    enc_pub TEXT NOT NULL,
+    state TEXT,
+    created_at INTEGER NOT NULL
+  )`,
+  `CREATE TABLE IF NOT EXISTS channel_devices (
+    channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+    device_id TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
+    added_at INTEGER NOT NULL,
+    PRIMARY KEY (channel_id, device_id)
   )`,
   `CREATE INDEX IF NOT EXISTS channel_members_user ON channel_members(user_id)`,
   `CREATE INDEX IF NOT EXISTS connections_user ON connections(user_id)`,
 ]
 
+// Columns added after a table first shipped; adding one twice fails harmlessly.
+const ADDED_COLUMNS = [`ALTER TABLE connections ADD COLUMN device_id TEXT`, `ALTER TABLE channels ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0`]
+
 let ready: Promise<unknown> | undefined
 
 export function ensureSchema(env: Env): Promise<unknown> {
-  ready ??= env.DB.batch(STATEMENTS.map(sql => env.DB.prepare(sql))).catch(error => {
-    ready = undefined
-    throw error
-  })
+  ready ??= env.DB.batch(STATEMENTS.map(sql => env.DB.prepare(sql)))
+    .then(() => Promise.all(ADDED_COLUMNS.map(sql => env.DB.prepare(sql).run().catch(() => undefined))))
+    .catch(error => {
+      ready = undefined
+      throw error
+    })
   return ready
 }

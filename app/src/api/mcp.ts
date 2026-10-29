@@ -43,11 +43,16 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
     run: (env, p, a) => data.channelDetail(env, p.userId, a.channel),
   }),
   create_channel: tool({
-    description: 'Create a channel and put this session in it. Bring people in with create_invite or add_member.',
-    input: z.object({ name: z.string().describe('Display name, 1-48 characters') }),
+    description:
+      'Create a channel and put this session in it. Bring people in with create_invite or add_member. ' +
+      "Set encrypted for end-to-end encryption: messages are then readable only by devices each member approves, and the server (and these tools) can't read them.",
+    input: z.object({
+      name: z.string().describe('Display name, 1-48 characters'),
+      encrypted: z.boolean().optional().describe('End-to-end encrypt this channel (default false). Fixed once created.'),
+    }),
     run: async (env, p, a, origin) => {
-      const channel = await data.createChannel(env, p.userId, a.name)
-      return connectLines(env, p, channel.id, origin, `Created channel "${channel.name}".`)
+      const channel = await data.createChannel(env, p.userId, a.name, a.encrypted ?? false)
+      return connectLines(env, p, channel.id, origin, `Created ${channel.encrypted ? 'end-to-end encrypted ' : ''}channel "${channel.name}".`)
     },
   }),
   join_channel: tool({
@@ -124,21 +129,35 @@ const TOOLS: Record<string, Tool<z.ZodObject>> = {
     run: async (env, p, a) => data.deleteConnection(env, p.userId, a.connection_id),
   }),
   read_messages: tool({
-    description: "Read a channel's recent messages (kept 14 days). Reading does not mark anything delivered.",
+    description: "Read a plain channel's recent messages (kept 14 days). Encrypted channels can only be read by their members' approved devices.",
     input: z.object({ channel: CHANNEL, limit: z.number().int().min(1).max(200).optional() }),
     readOnly: true,
-    run: (env, p, a) => data.readMessages(env, p.userId, a.channel, a.limit),
+    run: async (env, p, a) => {
+      const { channel, messages } = await data.readMessages(env, p.userId, a.channel, a.limit)
+      if (channel.encrypted) throw new data.UserError(400, `"${channel.name}" is end-to-end encrypted; read it in a connected session or an unlocked browser.`)
+      return { channel: channel.name, messages: messages.map(m => ({ ...m, ...plain(m.text) })) }
+    },
   }),
   post_message: tool({
-    description:
-      'Post to a channel as yourself (your GitHub login). Sessions with the agent-rooms plugin should use SendMessage to room:<name> instead.',
+    description: 'Post to a plain channel as yourself (your GitHub login). Sessions with the agent-rooms plugin should use SendMessage to room:<name> instead.',
     input: z.object({
       channel: CHANNEL,
       text: z.string(),
       to: z.string().optional().describe("A connected session's name, or a member's GitHub login to reach all their sessions; omit for everyone"),
     }),
-    run: (env, p, a) => data.postMessage(env, p.userId, a.channel, a.text, a.to),
+    run: (env, p, a) => data.postMessage(env, p.userId, a.channel, { text: a.text }, a.to),
   }),
+}
+
+// A plain message's text and attachment names (older ones are bare text).
+function plain(stored: string) {
+  try {
+    const value = JSON.parse(stored) as { v?: number; text?: string; files?: { name: string }[] }
+    if (value?.v === 0) return { text: value.text ?? '', files: (value.files ?? []).map(f => f.name) }
+  } catch {
+    // Bare text.
+  }
+  return { text: stored }
 }
 
 // The connect code rides in the result; the agent-rooms plugin claims it as this session.

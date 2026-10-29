@@ -47,12 +47,13 @@ function SignIn() {
 function Channels() {
   const list = useApi<{ channels: ChannelSummary[] }>('/channels')
   const [name, setName] = useState('')
+  const [encrypted, setEncrypted] = useState(false)
   const [error, setError] = useState<string>()
 
   const create = async () => {
     setError(undefined)
     try {
-      const made = await api<{ id: string }>('/channels', { method: 'POST', body: { name } })
+      const made = await api<{ id: string }>('/channels', { method: 'POST', body: { name, encrypted } })
       location.assign(`/channels/${made.id}`)
     } catch (e) {
       setError((e as Error).message)
@@ -74,6 +75,9 @@ function Channels() {
           }}
         >
           <input placeholder="New channel name" value={name} onChange={e => setName(e.target.value)} />
+          <label className="check" title="Messages are readable only by devices each member approves; the server can't read them. Fixed once created.">
+            <input type="checkbox" checked={encrypted} onChange={e => setEncrypted(e.target.checked)} /> <Icon name="lock" size={14} /> Encrypted
+          </label>
           <button className="primary" disabled={!name.trim()}>
             <Icon name="plus" /> Create
           </button>
@@ -91,7 +95,14 @@ function Channels() {
           {list.data?.channels.map(c => (
             <Link key={c.id} to="/channels/$id" params={{ id: c.id }} className="card channel-card">
               <div className="row" style={{ justifyContent: 'space-between' }}>
-                <span className="name">{c.name}</span>
+                <span className="name">
+                  {c.encrypted ? (
+                    <span title="End-to-end encrypted" style={{ color: 'var(--accent)', marginRight: 6, verticalAlign: '-2px' }}>
+                      <Icon name="lock" size={14} />
+                    </span>
+                  ) : null}
+                  {c.name}
+                </span>
                 <span className={`badge ${c.role === 'owner' ? 'accent' : ''}`}>{c.role === 'owner' ? 'Owner' : 'Member'}</span>
               </div>
               <div className="stats">

@@ -23,6 +23,25 @@ const PATHS: Record<string, ReactNode> = {
   arrow: <path d="M5 12h14M13 6l6 6-6 6" />,
   back: <path d="M19 12H5M11 6l-6 6 6 6" />,
   x: <path d="M6 6l12 12M18 6L6 18" />,
+  lock: (
+    <>
+      <rect x="5" y="11" width="14" height="10" rx="2" />
+      <path d="M8 11V8a4 4 0 0 1 8 0v3" />
+    </>
+  ),
+  key: (
+    <>
+      <circle cx="8" cy="15" r="4" />
+      <path d="M11 12l9-9M17 6l3 3M15 8l2 2" />
+    </>
+  ),
+  globe: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+    </>
+  ),
+  paperclip: <path d="M20 11.5l-8.2 8.2a5 5 0 0 1-7-7L13 4.5a3.3 3.3 0 0 1 4.7 4.7l-8.2 8.2a1.7 1.7 0 0 1-2.4-2.4l7.6-7.6" />,
 }
 
 export function Icon({ name, size = 16 }: { name: keyof typeof PATHS; size?: number }) {

@@ -18,7 +18,8 @@ export type RoomMessage = {
   sentAt: number
 }
 
-const MAX_TEXT = 16_000
+// An envelope: the ciphertext plus a wrapped key per recipient device.
+const MAX_TEXT = 400_000
 const MAX_PULL = 50
 // A session (`<login>.<session>`) or a person (`<login>`).
 const ADDRESS = /^[a-z0-9][a-z0-9._-]{0,95}$/

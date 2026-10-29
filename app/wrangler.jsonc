@@ -8,6 +8,8 @@
   // Created on first deploy, and reused by later ones.
   "d1_databases": [{ "binding": "DB", "database_name": "agent-rooms" }],
   "kv_namespaces": [{ "binding": "OAUTH_KV" }],
+  // Encrypted message attachments.
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "agent-rooms-files" }],
   "durable_objects": {
     "bindings": [{ "name": "ROOMS", "class_name": "Room" }]
   },

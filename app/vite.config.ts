@@ -4,6 +4,7 @@ import react from '@vitejs/plugin-react'
 import { defineConfig } from 'vite'
 
 export default defineConfig({
-  server: { port: 5173 },
+  // The encryption code is shared with the plugin, one folder up.
+  server: { port: 5173, fs: { allow: ['..'] } },
   plugins: [cloudflare({ viteEnvironment: { name: 'ssr' } }), tanstackStart(), react()],
 })

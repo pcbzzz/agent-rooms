@@ -84,15 +84,31 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
 
   web.get('/me', c => c.json({ user: c.get('user') }))
   web.get('/channels', async c => c.json({ channels: await data.listChannels(c.env, uid(c)) }))
-  web.post('/channels', async c => c.json(await data.createChannel(c.env, uid(c), (await c.req.json<{ name: string }>()).name)))
+  web.post('/channels', async c => {
+    const { name, encrypted } = await c.req.json<{ name: string; encrypted?: boolean }>()
+    return c.json(await data.createChannel(c.env, uid(c), name, !!encrypted))
+  })
   web.get('/channels/:id', async c => c.json(await data.channelDetail(c.env, uid(c), c.req.param('id'))))
   web.patch('/channels/:id', async c => c.json(await data.renameChannel(c.env, uid(c), c.req.param('id'), (await c.req.json<{ name: string }>()).name)))
   web.delete('/channels/:id', async c => c.json(await data.deleteChannel(c.env, uid(c), c.req.param('id'))))
   web.get('/channels/:id/messages', async c => c.json(await data.readMessages(c.env, uid(c), c.req.param('id'), Number(c.req.query('limit') ?? 50))))
   web.post('/channels/:id/messages', async c => {
-    const { text, to } = await c.req.json<{ text: string; to?: string }>()
-    return c.json(await data.postMessage(c.env, uid(c), c.req.param('id'), text, to || undefined))
+    const body = await c.req.json<{ text?: string; files?: unknown; envelope?: unknown; device?: string; to?: string }>()
+    return c.json(await data.postMessage(c.env, uid(c), c.req.param('id'), body, body.to || undefined))
   })
+  web.get('/channels/:id/devices', async c => c.json(await data.channelDevicesFor(c.env, uid(c), c.req.param('id'))))
+  web.post('/channels/:id/devices', async c => c.json(await data.addChannelDevice(c.env, uid(c), c.req.param('id'), (await c.req.json<{ device: string }>()).device)))
+  web.post('/channels/:id/files', async c => {
+    const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
+    return c.json(await data.putFile(c.env, channel.id, await c.req.arrayBuffer()))
+  })
+  web.get('/channels/:id/files/:file', async c => {
+    const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
+    return data.getFile(c.env, channel.id, c.req.param('file'))
+  })
+  web.post('/devices', async c => c.json(await data.registerDevice(c.env, uid(c), { ...(await c.req.json<data.DeviceKeys>()), kind: 'browser' })))
+  web.get('/devices/:id/state', async c => c.json(await data.deviceState(c.env, uid(c), c.req.param('id'))))
+  web.put('/devices/:id/state', async c => c.json(await data.deviceState(c.env, uid(c), c.req.param('id'), (await c.req.json<{ state: string }>()).state)))
   web.post('/channels/:id/members', async c => c.json(await data.addMember(c.env, uid(c), c.req.param('id'), (await c.req.json<{ login: string }>()).login)))
   web.delete('/channels/:id/members/:login', async c => c.json(await data.removeMember(c.env, uid(c), c.req.param('id'), c.req.param('login'))))
   web.post('/channels/:id/invites', async c => {
@@ -115,8 +131,8 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   // --- connected sessions (the agent-rooms plugin) -----------------------------------
 
   app.post('/c/claim/:claim', async c => {
-    const { session } = await c.req.json<{ session?: string }>().catch(() => ({ session: undefined }))
-    const made = await data.claimConnection(c.env, c.req.param('claim'), session ?? 'session')
+    const { session, device } = await c.req.json<{ session?: string; device?: data.DeviceKeys }>().catch(() => ({ session: undefined, device: undefined }))
+    const made = await data.claimConnection(c.env, c.req.param('claim'), session ?? 'session', device)
     return c.json({ ...made, url: new URL(c.req.url).origin })
   })
 
@@ -140,14 +156,18 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   session.get('/messages', forward('/messages'))
   session.post('/messages', async c => {
     const conn = c.get('conn')
-    const body = await c.req.json<{ to?: string | null }>()
+    const body = await c.req.json<{ id: string; to?: string | null; text?: string; files?: unknown; envelope?: unknown }>()
+    const text = data.messageBody(conn, body, conn.device_id)
     await data.checkRecipient(c.env, conn.channel_id, body.to)
     return data.room(c.env, conn.channel_id).fetch('https://room/messages', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Room-Member': conn.member },
-      body: JSON.stringify(body),
+      body: JSON.stringify({ id: body.id, to: body.to ?? null, text }),
     })
   })
+  session.get('/devices', async c => c.json({ devices: await data.channelDevices(c.env, c.get('conn').channel_id) }))
+  session.post('/files', async c => c.json(await data.putFile(c.env, c.get('conn').channel_id, await c.req.arrayBuffer())))
+  session.get('/files/:file', c => data.getFile(c.env, c.get('conn').channel_id, c.req.param('file')))
   session.post('/ack', forward('/ack'))
   // The session leaves on its own: its connection is deleted and its name freed.
   session.post('/leave', async c => {
@@ -161,6 +181,8 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
     return c.json({
       channel: conn.channel_name,
       you: conn.member,
+      device: conn.device_id,
+      encrypted: !!conn.encrypted,
       members: detail.connections.map(k => ({ name: k.member, login: k.login, isOnline: k.isOnline, lastSeen: k.last_seen_at })),
       people: detail.members.map(m => m.login),
     })
