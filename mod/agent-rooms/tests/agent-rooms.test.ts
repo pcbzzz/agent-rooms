@@ -8,14 +8,14 @@ type Sent = { method: string; path: string; body: unknown }
 
 // A fake channel server beneath the plugin's $.http.fetch, plus the rest of
 // the engine the mod calls on.
-function world(on: On, inbox: unknown[] = []) {
+function world(on: On, inbox: unknown[] = [], stored: Record<string, unknown> = {}, aliceOnline = true) {
   const sent: Sent[] = []
   const submitted: string[] = []
   const appended: string[] = []
   const toAgents: { agentId: string; text: string }[] = []
   let pending = [...inbox]
 
-  mock.store(on)
+  mock.store(on, stored)
   mock.clock(on, { now: 1_000_000 })
   on('session.id', () => ({ value: 'sess-1' }))
   on('command.register', () => ({ value: { command: 'room' } }))
@@ -37,7 +37,7 @@ function world(on: On, inbox: unknown[] = []) {
     if (path === '/c/claim/abc123') return reply({ token: 'crt_tok', channelId: 'ch1', channel: 'pairing', member: 'alice', url: URL })
     if (path === '/c/members')
       return reply({
-        members: [{ name: 'alice', login: 'alice', isOnline: true, lastSeen: 1 }, { name: 'bob', login: 'bob', isOnline: true, lastSeen: 1 }],
+        members: [{ name: 'alice', login: 'alice', isOnline: aliceOnline, lastSeen: 1 }, { name: 'bob', login: 'bob', isOnline: true, lastSeen: 1 }],
         people: ['alice', 'bob', 'carl'],
       })
     if (path === '/c/messages' && method === 'GET') {
@@ -150,4 +150,37 @@ test('a message arriving mid-turn joins that turn, and marks it', async ($, on) 
   await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1, isAborted: false } as never)
   await settle(() => w.submitted.length > 0)
   expect(w.submitted[0]).toContain('1 message arrived as your last turn ended')
+})
+
+test('a relaunched session with a new id reconnects by its title', async ($, on) => {
+  const saved = { url: URL, token: 'crt_tok', channel: 'pairing', channelId: 'ch1', member: 'alice' }
+  // Saved by the same session under its old id; alice is offline on the server.
+  const w = world(on, [], { 'config:old-id': saved, 'resume:/work:fix-login-bug': saved }, false)
+  on('classic.SessionStart', () => ({}) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.classic.SessionStart({ source: 'resume', session_title: 'Fix login bug' } as never)
+  await settle(() => w.sent.some(s => s.path === '/c/messages' && s.method === 'GET'))
+
+  expect(w.sent.some(s => s.path.startsWith('/c/claim/'))).toBe(false)
+  const composed = await $.prompt.compose({
+    model: 'claude-opus-5-5',
+    promptModel: 'claude-opus-5-5',
+    surfaces: ['terminal'],
+    tools: [],
+    outputStyle: { name: 'default', isKeepingCodingInstructions: true },
+    traits: [],
+  })
+  expect(composed.sections.find(s => s.id === 'agent-rooms:channel')?.text).toContain('room:alice')
+})
+
+test('a relaunched session leaves a connection another open session is using', async ($, on) => {
+  const saved = { url: URL, token: 'crt_tok', channel: 'pairing', channelId: 'ch1', member: 'alice' }
+  const w = world(on, [], { 'resume:/work:fix-login-bug': saved }, true)
+  on('classic.SessionStart', () => ({}) as never)
+  await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
+  await $.classic.SessionStart({ source: 'resume', session_title: 'Fix login bug' } as never)
+  await settle(() => w.sent.some(s => s.path === '/c/members'))
+  await settle(() => false)
+
+  expect(w.sent.some(s => s.path === '/c/messages')).toBe(false)
 })

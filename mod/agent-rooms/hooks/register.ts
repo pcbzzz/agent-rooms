@@ -27,6 +27,8 @@ const CHANNEL_SAFE = new Set(['ListAgents', 'ToolSearch'])
 
 let sessionId = ''
 let sessionTitle = ''
+let sessionCwd = ''
+let resuming = false
 // The main loop's running turn, and channel messages added to it that no model request has read yet.
 let mainTurn: string | undefined
 let unreadInTurn = 0
@@ -43,12 +45,15 @@ let turnTimes: number[] = []
 let stopPoll: (() => void) | undefined
 
 const configKey = () => `config:${sessionId}`
-const deliveredKey = (c: Config) => `delivered:${sessionId}:${c.channelId}:${c.member}`
+// A relaunched session can come back with a new id; its title and folder find its connection again.
+const resumeKey = () => (titleSlug() ? `resume:${sessionCwd}:${titleSlug()}` : undefined)
+const deliveredKey = (c: Config) => `delivered:${c.channelId}:${c.member}`
 
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     const started = await next(e)
     sessionId = await $.session.id()
+    sessionCwd = e.cwd
     await $.command.register({
       name: 'room',
       description: 'Channel chat: join <connect-url> | leave | resume | status',
@@ -56,16 +61,19 @@ export const register: Register = on => {
     })
     config = parseConfig(await $.store.get(configKey()))
     if (config) connect($)
+    else void resume($)
     return started
   })
 
-  // The session's title names it in the channel.
+  // The session's title names it in the channel, and finds its connection after a relaunch.
   on('classic.SessionStart', async ($, e, next) => {
     if (e.session_title) sessionTitle = e.session_title
+    void resume($)
     return next(e)
   })
   on('classic.UserPromptSubmit', async ($, e, next) => {
     if (e.session_title) sessionTitle = e.session_title
+    void resume($)
     return next(e)
   })
 
@@ -220,7 +228,7 @@ async function claim($: EngineInterface, url: string): Promise<{ ok: true; confi
       socketGeneration++
       await call($, config, 'POST', 'leave')
     }
-    await $.store.set(configKey(), next)
+    await remember($, next)
     config = next
     paused = false
     members = []
@@ -231,8 +239,40 @@ async function claim($: EngineInterface, url: string): Promise<{ ok: true; confi
   }
 }
 
+async function remember($: EngineInterface, c: Config) {
+  await $.store.set(configKey(), c)
+  const key = resumeKey()
+  if (key) await $.store.set(key, c)
+}
+
+// Reconnects a relaunched session to the connection saved under its title,
+// unless another open session is using it.
+async function resume($: EngineInterface) {
+  const key = resumeKey()
+  if (config || resuming || !sessionId || !key) return
+  resuming = true
+  try {
+    const saved = parseConfig(await $.store.get(key))
+    if (!saved) return
+    const got = await call($, saved, 'GET', 'members')
+    if (!got.ok) {
+      if (got.status === 401) await $.store.delete(key)
+      return
+    }
+    const mine = (got.body as { members: Member[] }).members.find(m => m.name === saved.member)
+    if (mine?.isOnline || config) return
+    await remember($, saved)
+    config = saved
+    connect($)
+  } finally {
+    resuming = false
+  }
+}
+
 async function disconnect($: EngineInterface) {
   await $.store.delete(configKey())
+  const key = resumeKey()
+  if (key) await $.store.delete(key)
   config = undefined
   members = []
   stopPoll?.()
@@ -377,8 +417,12 @@ async function nudge($: EngineInterface, c: Config, count: number) {
 }
 
 // This session's name in the channel: its title, then a short id so two sessions never share one.
+function titleSlug(): string {
+  return sessionTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/, '')
+}
+
 function sessionName(): string {
-  const title = sessionTitle.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 30).replace(/-+$/, '')
+  const title = titleSlug()
   const id = sessionId.replace(/[^a-z0-9]/gi, '').toLowerCase().slice(0, 6) || 'local'
   return `${title || 'session'}-${id}`
 }

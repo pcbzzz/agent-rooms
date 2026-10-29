@@ -270,9 +270,26 @@ export async function claimConnection(env: Env, claim: string, session: string) 
   await env.DB.prepare(`DELETE FROM claims WHERE hash = ? OR expires_at < ?`).bind(hash, now()).run()
   if (!row || row.expires_at < now()) throw new UserError(400, 'This connect code is invalid, used or expired; make a new one.')
 
-  const member = `${row.login}.${session}`
+  let member = `${row.login}.${session}`
   const token = `crt_${randomId(24)}`
-  const previous = await env.DB.prepare(`SELECT id FROM connections WHERE channel_id = ? AND member = ?`).bind(row.channel_id, member).first<{ id: string }>()
+  let previous = await env.DB.prepare(`SELECT id FROM connections WHERE channel_id = ? AND member = ?`).bind(row.channel_id, member).first<{ id: string }>()
+  // A relaunched session can come back with a new id: it takes back the
+  // offline connection of a session with the same title, name and all.
+  const title = session.replace(/-[a-z0-9]{6}$/, '')
+  if (!previous && title !== session && title !== 'session') {
+    const { online } = await roomCall<{ online: string[] }>(env, row.channel_id, '/presence')
+    const prefix = `${row.login}.${title}-`
+    const same = await env.DB.prepare(
+      `SELECT id, member FROM connections WHERE channel_id = ? AND user_id = ? AND substr(member, 1, ?) = ? ORDER BY last_seen_at DESC`,
+    )
+      .bind(row.channel_id, row.user_id, prefix.length, prefix)
+      .all<{ id: string; member: string }>()
+    const offline = same.results.find(c => /^[a-z0-9]{6}$/.test(c.member.slice(prefix.length)) && !online.includes(c.member))
+    if (offline) {
+      previous = { id: offline.id }
+      member = offline.member
+    }
+  }
   await env.DB.prepare(
     `INSERT INTO connections (id, channel_id, user_id, member, token_hash, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(id) DO UPDATE SET token_hash = excluded.token_hash, last_seen_at = excluded.last_seen_at`,
