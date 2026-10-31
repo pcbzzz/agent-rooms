@@ -11,8 +11,9 @@ import type { EngineInterface, Register } from 'claude-code'
 // kept by the helper (helper/helper.mjs), which also does all the
 // cryptography. In an encrypted channel a message is encrypted only to devices
 // the person here approved, in Claude Code's own question dialog; messages
-// from devices they have not approved are held until they decide. A plain
-// channel needs none of that.
+// from devices they have not approved are held until they decide. A decision
+// is about a device, so it holds in every channel and session on this machine.
+// A plain channel needs none of that.
 
 type Config = { url: string; token: string; channel: string; channelId: string; member: string; encrypted: boolean }
 type SocketState = 'off' | 'connecting' | 'open' | 'closed' | 'revoked'
@@ -31,8 +32,6 @@ type Room = {
   members: Member[]
   people: string[]
   devices: ChannelDevice[]
-  // This machine's decisions about the channel's devices.
-  trust: Record<string, Decision>
   socketState: SocketState
   pulling: boolean
   pullAgain: boolean
@@ -76,7 +75,9 @@ let helperGeneration = 0
 let helperWaiters: ((d: Device | undefined) => void)[] = []
 let reviewing = false
 let reviewAgain = false
-const later = new Map<string, number>()
+// This machine's decisions about devices, and when to ask again about those put off.
+let trust: Record<string, Decision> = {}
+let later: Record<string, number> = {}
 
 const configKey = () => `config:${sessionId}`
 // A relaunched session can come back with a new id; its title and folder find its connection again.
@@ -91,8 +92,8 @@ export const register: Register = on => {
     sessionCwd = e.cwd
     await $.command.register({
       name: 'room',
-      description: 'Channel chat: join <connect-url> | leave [channel] | devices [channel] | approve <fingerprint> | deny <fingerprint> | resume | status',
-      argumentHint: 'join <connect-url> | leave [channel] | devices [channel] | approve <fp> | deny <fp> | resume | status',
+      description: 'Channel chat: join <connect-url> | leave [channel] | devices [channel] | approve | deny | undo <fingerprint> | resume | status',
+      argumentHint: 'join <connect-url> | leave [channel] | devices [channel] | approve <fp> | deny <fp> | undo <fp> | resume | status',
     })
     void runHelper($, ++helperGeneration)
     rooms = parseConfigs(await $.store.get(configKey())).map(newRoom)
@@ -152,24 +153,30 @@ export const register: Register = on => {
         listed.map(async r => {
           await refreshDevices($, r)
           const rows = r.devices.map(d => {
-            const state = d.id === device?.id ? 'this device' : (r.trust[d.id]?.decision ?? 'not decided')
+            const state = d.id === device?.id ? 'this device' : (trust[d.id]?.decision ?? 'not decided')
             return `  ${fingerprint(d.id)}  ${describe(d)}  — ${state}${d.isOnline ? ', online' : ''}`
           })
           return [`Devices in ${r.config.channel}:`, ...(rows.length ? rows : ['  none yet'])].join('\n')
         }),
       )
-      return { text: [...blocks, '', 'Approve or deny with /room approve <fingerprint> or /room deny <fingerprint>.'].join('\n') }
+      return {
+        text: [...blocks, '', 'Approve or deny with /room approve <fingerprint> or /room deny <fingerprint>; /room undo <fingerprint> takes a decision back.'].join('\n'),
+      }
     }
 
-    if (verb === 'approve' || verb === 'deny') {
+    if (verb === 'approve' || verb === 'deny' || verb === 'undo') {
       await Promise.all(rooms.map(r => refreshDevices($, r)))
       const wanted = arg.toLowerCase()
-      const found = rooms.flatMap(r => r.devices.filter(d => d.id !== device?.id && wanted.length >= 4 && d.id.startsWith(wanted)).map(d => ({ room: r, device: d })))
-      const ids = new Set(found.map(f => f.device.id))
-      if (ids.size !== 1) return { text: ids.size ? 'That matches several devices; give more of the fingerprint.' : 'No device with that fingerprint. /room devices lists them.' }
-      // The same device in several of this session's channels: decided in each.
-      for (const f of found) await decide($, f.room, f.device, verb === 'approve' ? 'approved' : 'denied')
-      return { text: `${verb === 'approve' ? 'Approved' : 'Denied'} ${describe(found[0]!.device)} in ${found.map(f => f.room.config.channel).join(', ')}.` }
+      const found = new Map(rooms.flatMap(r => r.devices).filter(d => d.id !== device?.id && wanted.length >= 4 && d.id.startsWith(wanted)).map(d => [d.id, d]))
+      if (found.size !== 1) return { text: found.size ? 'That matches several devices; give more of the fingerprint.' : 'No device with that fingerprint. /room devices lists them.' }
+      const d = [...found.values()][0]!
+      await decide($, d, verb === 'approve' ? 'approved' : verb === 'deny' ? 'denied' : 'undecided')
+      return {
+        text:
+          verb === 'undo'
+            ? `Took back the decision about ${describe(d)}; you'll be asked about it again.`
+            : `${verb === 'approve' ? 'Approved' : 'Denied'} ${describe(d)} in every channel. /room undo ${d.id.slice(0, 8).toUpperCase()} takes it back.`,
+      }
     }
 
     await Promise.all(rooms.map(r => refreshMembers($, r)))
@@ -245,7 +252,7 @@ export const register: Register = on => {
           ? ['  no other sessions connected yet']
           : others(r).map(m => {
               const d = deviceOf(m.name)
-              const unapproved = r.config.encrypted && d && d.id !== device?.id && r.trust[d.id]?.decision !== 'approved' ? ' — its device is not approved, so messages are not sent to it' : ''
+              const unapproved = r.config.encrypted && d && d.id !== device?.id && trust[d.id]?.decision !== 'approved' ? ' — its device is not approved, so messages are not sent to it' : ''
               return `  ${address(r, m.name)} (${m.login}'s session) — ${m.isOnline ? 'online' : `offline, last seen ${ago(m.lastSeen)}; messages wait for it`}${unapproved}`
             })),
         ...(r.people.length > 0 ? [`  people (all their sessions and the website): ${r.people.map(p => address(r, p)).join(', ')}`] : []),
@@ -409,7 +416,7 @@ async function openSocket($: EngineInterface, r: Room) {
 
 // --- connections ----------------------------------------------------------------
 
-const newRoom = (config: Config): Room => ({ config, members: [], people: [], devices: [], trust: {}, socketState: 'off', pulling: false, pullAgain: false })
+const newRoom = (config: Config): Room => ({ config, members: [], people: [], devices: [], socketState: 'off', pulling: false, pullAgain: false })
 
 async function claim($: EngineInterface, url: string): Promise<{ ok: true; room: Room } | { ok: false; error: string }> {
   const me = await helperDevice($)
@@ -534,20 +541,24 @@ function registerDevice($: EngineInterface, r: Room): Promise<boolean> {
 }
 
 async function refreshDevices($: EngineInterface, r: Room) {
-  const c = r.config
-  const [listed, decided] = await Promise.all([
-    call($, c, 'GET', 'devices'),
-    device ? helper<{ devices: Record<string, Decision> }>($, 'GET', `/trust?channel=${encodeURIComponent(c.channelId)}`).catch(() => undefined) : undefined,
-  ])
+  const [listed] = await Promise.all([call($, r.config, 'GET', 'devices'), refreshTrust($)])
   if (listed.ok) r.devices = (listed.body as { devices: ChannelDevice[] }).devices
-  if (decided) r.trust = decided.devices
 }
 
-const waitingDevices = (r: Room) => (r.config.encrypted ? r.devices.filter(d => d.id !== device?.id && !r.trust[d.id]) : [])
+async function refreshTrust($: EngineInterface) {
+  if (!device) return
+  const got = await helper<{ devices: Record<string, Decision>; later?: Record<string, number> }>($, 'GET', '/trust').catch(() => undefined)
+  if (!got) return
+  trust = got.devices
+  later = got.later ?? {}
+}
+
+const waitingDevices = (r: Room) => (r.config.encrypted ? r.devices.filter(d => d.id !== device?.id && !trust[d.id]) : [])
 
 // Asks the person, in Claude Code's own dialog, about each device in an
 // encrypted channel this machine has not decided on. Nobody is encrypted to
-// before that. One dialog at a time, across all the channels.
+// before that. One question per device, asked by one session on this machine
+// at a time; the others pick up its answers.
 async function reviewDevices($: EngineInterface) {
   if (!device) return
   if (reviewing) {
@@ -555,42 +566,47 @@ async function reviewDevices($: EngineInterface) {
     return
   }
   reviewing = true
+  let locked = false
   try {
     do {
       reviewAgain = false
-      for (const r of rooms.filter(r => r.config.encrypted)) {
-        await refreshDevices($, r)
-        for (const d of r.devices) {
-          if (d.id === device.id || r.trust[d.id] || (later.get(`${r.config.channelId}:${d.id}`) ?? 0) > Date.now()) continue
-          const answer = await $.ui
-            .ask(`${describe(d)} (fingerprint ${fingerprint(d.id)}) wants to read and send messages in "${r.config.channel}". Approve it?`, {
-              header: 'New device',
-              // First, so a dialog that resolves itself while nobody is at the keyboard approves nothing.
-              options: ['Decide later', 'Approve', 'Deny'],
-            })
-            .catch(() => 'Decide later')
-          if (!rooms.includes(r)) break
-          // Another session on this machine may have decided meanwhile.
-          await refreshDevices($, r)
-          if (r.trust[d.id]) continue
-          if (answer === 'Approve') await decide($, r, d, 'approved')
-          else if (answer === 'Deny') await decide($, r, d, 'denied')
-          else later.set(`${r.config.channelId}:${d.id}`, Date.now() + LATER_MS)
-        }
+      const encrypted = rooms.filter(r => r.config.encrypted)
+      await Promise.all(encrypted.map(r => refreshDevices($, r)))
+      const pending = new Map(encrypted.flatMap(r => r.devices).filter(d => d.id !== device!.id && !trust[d.id] && (later[d.id] ?? 0) <= Date.now()).map(d => [d.id, d]))
+      if (pending.size === 0) break
+      locked ||= (await helper<{ ok: boolean }>($, 'POST', '/review/lock').catch(() => ({ ok: false }))).ok
+      // Another session here is asking; its answers reach this one through the shared decisions.
+      if (!locked) break
+      for (const d of pending.values()) {
+        const where = encrypted.filter(r => r.devices.some(x => x.id === d.id)).map(r => `"${r.config.channel}"`)
+        const answer = await $.ui
+          .ask(`${describe(d)} (fingerprint ${fingerprint(d.id)}) wants to read and send messages in ${where.join(', ')}. Approve it? This applies in every channel it joins.`, {
+            header: 'New device',
+            // First, so a dialog that resolves itself while nobody is at the keyboard approves nothing.
+            options: ['Decide later', 'Approve', 'Deny'],
+          })
+          .catch(() => 'Decide later')
+        // Decided meanwhile, with /room approve or the like.
+        await refreshTrust($)
+        if (trust[d.id]) continue
+        if (answer === 'Approve') await decide($, d, 'approved')
+        else if (answer === 'Deny') await decide($, d, 'denied')
+        else await helper($, 'POST', '/later', { id: d.id, until: Date.now() + LATER_MS }).catch(() => undefined)
       }
     } while (reviewAgain)
     showStatus($)
   } finally {
+    if (locked) await helper($, 'POST', '/review/unlock').catch(() => undefined)
     reviewing = false
   }
 }
 
-async function decide($: EngineInterface, r: Room, d: ChannelDevice, decision: Decision['decision']) {
-  await helper($, 'POST', '/trust', { channelId: r.config.channelId, device: d, decision })
-  r.trust[d.id] = { decision }
-  later.delete(`${r.config.channelId}:${d.id}`)
-  await releaseHeld($, r, d.id, decision === 'approved')
+async function decide($: EngineInterface, d: ChannelDevice, decision: Decision['decision'] | 'undecided') {
+  await helper($, 'POST', '/trust', { device: d, decision })
+  await refreshTrust($)
+  for (const r of rooms.filter(r => r.devices.some(x => x.id === d.id))) await releaseHeld($, r, d.id, decision === 'approved')
   showStatus($)
+  if (decision === 'undecided') void reviewDevices($)
 }
 
 // Messages from a device that was not approved yet wait here, never shown.
@@ -679,9 +695,9 @@ async function send($: EngineInterface, target: string, text: string, files: str
   // A direct message also goes to both people's other devices, so their browsers can read it.
   const people = to === null ? [] : [loginOf(to), loginOf(c.member)]
   const copies = r.devices.filter(d => d.id !== device!.id && !reached.includes(d) && people.includes(d.login))
-  const isApproved = (d: ChannelDevice) => r.trust[d.id]?.decision === 'approved'
+  const isApproved = (d: ChannelDevice) => trust[d.id]?.decision === 'approved'
   const approved = reached.filter(isApproved)
-  const waiting = reached.filter(d => !r.trust[d.id])
+  const waiting = reached.filter(d => !trust[d.id])
   if (approved.length === 0 && reached.length > 0)
     return {
       ok: false,
@@ -765,7 +781,7 @@ async function openAll($: EngineInterface, r: Room, messages: RoomMessage[]): Pr
     } else if (opened.status === 'untrusted') {
       await hold($, c, m)
       // It may have been approved while this was being held.
-      if (r.trust[opened.device]?.decision === 'approved') void releaseHeld($, r, opened.device, true)
+      if (trust[opened.device]?.decision === 'approved') void releaseHeld($, r, opened.device, true)
       else void reviewDevices($)
     } else if (opened.status === 'invalid') {
       $.ui.log(`agent-rooms: skipped a message from ${m.from} that could not be decrypted (${opened.error ?? 'invalid'})`, { to: 'debug' })

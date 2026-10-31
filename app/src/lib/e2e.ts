@@ -118,25 +118,35 @@ async function finish(_user: { id: string; login: string }, device: BrowserDevic
 
 // --- this browser's decisions about other devices ------------------------------------
 
+// Keyed by device: a decision holds in every channel. Earlier ones were kept
+// per channel (`<channel>:<device>`); the latest for each device wins.
 async function loadTrust() {
   if (!unlocked) return
+  let saved: Record<string, Decision>
   if (unlocked.stateKey) {
     const { state } = await api<{ state: string | null }>(`/devices/${unlocked.id}/state`)
-    trust = state ? await core.decryptState<Record<string, Decision>>(state, unlocked.stateKey) : {}
+    saved = state ? await core.decryptState<Record<string, Decision>>(state, unlocked.stateKey) : {}
   } else {
-    trust = JSON.parse(safeGet(LOCAL_TRUST) ?? '{}')
+    saved = JSON.parse(safeGet(LOCAL_TRUST) ?? '{}')
+  }
+  trust = {}
+  for (const [key, d] of Object.entries(saved)) {
+    const id = key.slice(key.indexOf(':') + 1)
+    if (!trust[id] || trust[id].at < d.at) trust[id] = d
   }
 }
 
-export async function decide(channelId: string, device: ChannelDevice, decision: Decision['decision']) {
+// 'undecided' takes a decision back.
+export async function decide(device: ChannelDevice, decision: Decision['decision'] | 'undecided') {
   if (!unlocked) throw new Error('Unlock first.')
   await loadTrust()
-  trust = { ...trust, [`${channelId}:${device.id}`]: { decision, signPub: device.signPub, encPub: device.encPub, login: device.login, label: device.label, at: Date.now() } }
+  const { [device.id]: _, ...rest } = trust
+  trust = decision === 'undecided' ? rest : { ...rest, [device.id]: { decision, signPub: device.signPub, encPub: device.encPub, login: device.login, label: device.label, at: Date.now() } }
   if (unlocked.stateKey) await api(`/devices/${unlocked.id}/state`, { method: 'PUT', body: { state: await core.encryptState(trust, unlocked.stateKey) } })
   else safeSet(LOCAL_TRUST, JSON.stringify(trust))
 }
 
-export const decisionFor = (channelId: string, deviceId: string) => trust[`${channelId}:${deviceId}`]
+export const decisionFor = (deviceId: string) => trust[deviceId]
 
 // --- messages and files -------------------------------------------------------------
 
@@ -156,7 +166,7 @@ export async function openMessage(channelId: string, text: string): Promise<Open
     return { status: 'plain', text }
   }
   if (!unlocked) return { status: 'locked' }
-  const sender = envelope.from === unlocked.id ? unlocked : decisionFor(channelId, envelope.from)
+  const sender = envelope.from === unlocked.id ? unlocked : decisionFor(envelope.from)
   if (!sender || ('decision' in sender && sender.decision !== 'approved')) return { status: 'unapproved', device: envelope.from }
   try {
     return { status: 'ok', payload: await core.open<Payload>({ channelId, envelope, me: unlocked, senderSignPub: sender.signPub }) }

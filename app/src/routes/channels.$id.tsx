@@ -33,10 +33,10 @@ function ChannelPage() {
       setError((e as Error).message)
     }
   }
-  const decide = async (d: e2e.ChannelDevice, decision: 'approved' | 'denied') => {
+  const decide = async (d: e2e.ChannelDevice, decision: 'approved' | 'denied' | 'undecided') => {
     setError(undefined)
     try {
-      await e2e.decide(id, d, decision)
+      await e2e.decide(d, decision)
       setTrustTick(t => t + 1)
     } catch (e) {
       setError((e as Error).message)
@@ -262,7 +262,7 @@ function Devices({
   channelId: string
   device: e2e.BrowserDevice | undefined
   trustTick: number
-  onDecide: (d: e2e.ChannelDevice, decision: 'approved' | 'denied') => void
+  onDecide: (d: e2e.ChannelDevice, decision: 'approved' | 'denied' | 'undecided') => void
   onUnlock: () => void
 }) {
   void trustTick
@@ -285,7 +285,7 @@ function Devices({
       <ul className="list">
         {devices.map(d => {
           const mine = d.id === device?.id
-          const decision = e2e.decisionFor(channelId, d.id)?.decision
+          const decision = e2e.decisionFor(d.id)?.decision
           return (
             <li key={d.id} className="device">
               <Icon name={d.kind === 'browser' ? 'globe' : 'terminal'} size={15} />
@@ -298,7 +298,16 @@ function Devices({
               {mine ? (
                 <span className="badge accent">this browser</span>
               ) : decision ? (
-                <span className={`badge ${decision === 'approved' ? 'ok' : 'denied'}`}>{decision}</span>
+                <span className="row" style={{ gap: 4 }}>
+                  <span className={`badge ${decision === 'approved' ? 'ok' : 'denied'}`}>{decision}</span>
+                  {device && (
+                    <Tip label={`Take back this ${decision === 'approved' ? 'approval' : 'denial'}`}>
+                      <button className="small ghost" onClick={() => onDecide(d, 'undecided')}>
+                        Undo
+                      </button>
+                    </Tip>
+                  )}
+                </span>
               ) : device ? (
                 <span className="row" style={{ gap: 4 }}>
                   <button className="small primary" onClick={() => onDecide(d, 'approved')}>
@@ -317,7 +326,7 @@ function Devices({
         {devices.length === 0 && <li className="list-empty">No devices yet.</li>}
       </ul>
       <p className="muted" style={{ margin: '10px 0 0' }}>
-        Compare fingerprints with their owner before approving. Messages are only encrypted to devices you approve.
+        Compare fingerprints with their owner before approving. Messages are only encrypted to devices you approve, and a decision holds in every channel.
       </p>
     </div>
   )
@@ -396,7 +405,7 @@ function Messages({
     const reached = devices.filter(d => d.id !== device?.id && (target === null || d.sessions.includes(target) || d.login === target))
     // A direct message also goes to both people's other devices, so each can read it everywhere.
     const people = target === null ? [] : [splitAddress(target).login, devices.find(d => d.id === device?.id)?.login]
-    const isApproved = (d: e2e.ChannelDevice) => e2e.decisionFor(channelId, d.id)?.decision === 'approved'
+    const isApproved = (d: e2e.ChannelDevice) => e2e.decisionFor(d.id)?.decision === 'approved'
     const copies = devices.filter(d => d.id !== device?.id && !reached.includes(d) && people.includes(d.login) && isApproved(d))
     const approved = reached.filter(isApproved)
     if (reached.length > 0 && approved.length === 0) return setError('None of the devices this would reach is approved yet. Approve them under Devices first.')

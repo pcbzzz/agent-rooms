@@ -197,7 +197,7 @@ test("an unapproved device's message is held, and shown once the person approves
   await joined($)
   await settle(() => w.submitted.length > 0)
 
-  expect(w.asked.some(q => q.includes(`eve's device "eve-mac"`) && q.endsWith('Approve it?'))).toBe(true)
+  expect(w.asked.some(q => q.includes(`eve's device "eve-mac"`) && q.includes('Approve it? This applies in every channel'))).toBe(true)
   expect(w.trust['dev-eve']).toEqual({ decision: 'approved' })
   expect(w.submitted[0]).toContain('hi from eve')
 })
@@ -375,4 +375,14 @@ test("a direct message is also encrypted to both people's other approved devices
   expect(await $.session.send({ to: 'room:bob.mac-111111', text: 'just you' } as never)).toEqual({ isDelivered: true })
   const ids = (w.helperCalls.find(c => c.path === '/seal')?.body as { recipients: { id: string }[] }).recipients.map(r => r.id)
   expect(ids.sort()).toEqual(['dev-bob', 'dev-bob-browser', 'dev-my-browser'])
+})
+
+test('a denied device can be approved, or its decision taken back', async ($, on) => {
+  const w = world(on, { trust: { 'dev-bob': { decision: 'approved' }, 'dev-eve': { decision: 'denied' } } })
+  await joined($)
+
+  await $.command.run({ command: 'room', args: 'approve dev-eve' } as never)
+  expect(w.trust['dev-eve']).toEqual({ decision: 'approved' })
+  await $.command.run({ command: 'room', args: 'undo dev-eve' } as never)
+  expect(w.helperCalls.filter(c => c.path === '/trust' && c.method === 'POST').at(-1)?.body).toMatchObject({ device: { id: 'dev-eve' }, decision: 'undecided' })
 })

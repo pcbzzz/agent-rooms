@@ -28,6 +28,9 @@ if (typeof WebSocket !== 'function') {
 const HOME = join(homedir(), '.claude', 'agent-rooms')
 const DEVICE_FILE = join(HOME, 'device.json')
 const TRUST_FILE = join(HOME, 'trust.json')
+// Held by the one session on this machine that is asking about devices right now.
+const REVIEW_LOCK = join(HOME, 'review.lock')
+const LOCK_STALE_MS = 10 * 60 * 1000
 const FILES_DIR = join(tmpdir(), 'agent-rooms')
 const MAX_FILE = 10 * 1024 * 1024
 mkdirSync(HOME, { recursive: true, mode: 0o700 })
@@ -53,14 +56,70 @@ async function loadDevice() {
 const device = await loadDevice()
 const publicDevice = () => ({ id: device.id, signPub: device.signPub, encPub: device.encPub, label: device.label })
 
-// --- approved devices, shared by every session on this machine ---------------------
+// --- device decisions, shared by every session and channel on this machine -----------
 
-const readTrust = () => (existsSync(TRUST_FILE) ? JSON.parse(readFileSync(TRUST_FILE, 'utf8')) : {})
-function decide(channelId, other, decision) {
+// { version: 2, devices: { [id]: decision }, later: { [id]: until } }. Before
+// version 2 decisions were kept per channel: the latest one for each device wins.
+function readTrust() {
+  const raw = existsSync(TRUST_FILE) ? JSON.parse(readFileSync(TRUST_FILE, 'utf8')) : {}
+  if (raw.version === 2) return raw
+  const devices = {}
+  for (const channel of Object.values(raw))
+    for (const [id, d] of Object.entries(channel)) if (!devices[id] || devices[id].at < d.at) devices[id] = d
+  return { version: 2, devices, later: {} }
+}
+
+function decide(other, decision) {
   const trust = readTrust()
-  trust[channelId] ??= {}
-  trust[channelId][other.id] = { decision, signPub: other.signPub, encPub: other.encPub, login: other.login, label: other.label, at: Date.now() }
+  // 'undecided' takes a decision back: the device is asked about again.
+  if (decision === 'undecided') delete trust.devices[other.id]
+  else trust.devices[other.id] = { decision, signPub: other.signPub, encPub: other.encPub, login: other.login, label: other.label, at: Date.now() }
+  delete trust.later[other.id]
   writePrivate(TRUST_FILE, trust)
+}
+
+function deferDevice(id, until) {
+  const trust = readTrust()
+  trust.later[id] = until
+  writePrivate(TRUST_FILE, trust)
+}
+
+// Only one session asks at a time; the lock is taken over once its holder is gone.
+function takeReviewLock() {
+  try {
+    writeFileSync(REVIEW_LOCK, JSON.stringify({ pid: process.pid, at: Date.now() }), { flag: 'wx', mode: 0o600 })
+    return true
+  } catch {
+    const held = (() => {
+      try {
+        return JSON.parse(readFileSync(REVIEW_LOCK, 'utf8'))
+      } catch {
+        return {}
+      }
+    })()
+    if (held.pid === process.pid) return true
+    if (alive(held.pid) && Date.now() - (held.at ?? 0) < LOCK_STALE_MS) return false
+    rmSync(REVIEW_LOCK, { force: true })
+    return takeReviewLock()
+  }
+}
+
+function dropReviewLock() {
+  try {
+    if (JSON.parse(readFileSync(REVIEW_LOCK, 'utf8')).pid === process.pid) rmSync(REVIEW_LOCK, { force: true })
+  } catch {
+    // Not held.
+  }
+}
+
+function alive(pid) {
+  if (!pid) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error.code === 'EPERM'
+  }
 }
 
 // --- server calls ----------------------------------------------------------------
@@ -111,8 +170,14 @@ function mimeOf(path) {
 const routes = {
   'GET /device': async () => publicDevice(),
 
-  'GET /trust': async (_, url) => ({ devices: readTrust()[url.searchParams.get('channel')] ?? {} }),
-  'POST /trust': async body => (decide(body.channelId, body.device, body.decision), { ok: true }),
+  'GET /trust': async () => {
+    const { devices, later } = readTrust()
+    return { devices, later }
+  },
+  'POST /trust': async body => (decide(body.device, body.decision), { ok: true }),
+  'POST /later': async body => (deferDevice(body.id, body.until), { ok: true }),
+  'POST /review/lock': async () => ({ ok: takeReviewLock() }),
+  'POST /review/unlock': async () => (dropReviewLock(), { ok: true }),
 
   // Encrypts text (and files) for the given devices; the files are uploaded encrypted.
   'POST /seal': async body => {
@@ -124,7 +189,7 @@ const routes = {
   // Opens an envelope from an approved device; files land in /tmp/agent-rooms.
   'POST /open': async body => {
     const { channelId, envelope } = body
-    const sender = envelope.from === device.id ? publicDevice() : readTrust()[channelId]?.[envelope.from]
+    const sender = envelope.from === device.id ? publicDevice() : readTrust().devices[envelope.from]
     if (!sender || (envelope.from !== device.id && sender.decision !== 'approved')) return { status: 'untrusted', device: envelope.from }
     try {
       const payload = await core.open({ channelId, envelope, me: device, senderSignPub: sender.signPub })
@@ -174,6 +239,7 @@ httpServer.listen(socketPath, () => {
 })
 const cleanup = () => {
   rmSync(socketPath, { force: true })
+  dropReviewLock()
   process.exit(0)
 }
 process.on('SIGTERM', cleanup)
