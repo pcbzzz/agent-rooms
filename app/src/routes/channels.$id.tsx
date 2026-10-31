@@ -20,7 +20,8 @@ function ChannelPage() {
   const [error, setError] = useState<string>()
   const [dialog, setDialog] = useState<'rename' | 'encrypt' | 'delete'>()
 
-  const unlock = async (create = false) => {
+  // `quiet`: an attempt the person didn't click for; if it doesn't work out, the Unlock button is still there.
+  const unlock = async (create = false, quiet = false) => {
     const user = me.data?.user
     if (!user) return
     setError(undefined)
@@ -30,9 +31,20 @@ function ChannelPage() {
       setDevice(unlocked)
       devs.reload()
     } catch (e) {
-      setError((e as Error).message)
+      if (!quiet) setError((e as Error).message)
     }
   }
+
+  // An encrypted channel shows nothing until this browser is unlocked: ask for the passkey on opening it.
+  // Some browsers only show passkey prompts after a click, and then it's the Unlock button.
+  const asked = useRef(false)
+  const encrypted = !!detail.data?.channel.encrypted
+  const signedIn = !!me.data?.user
+  useEffect(() => {
+    if (!encrypted || !signedIn || device || asked.current) return
+    asked.current = true
+    void unlock(false, true)
+  }, [encrypted, signedIn, device])
   const decide = async (d: e2e.ChannelDevice, decision: 'approved' | 'denied' | 'undecided') => {
     setError(undefined)
     try {
