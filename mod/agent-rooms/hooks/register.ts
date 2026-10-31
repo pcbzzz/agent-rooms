@@ -778,10 +778,12 @@ async function refreshMembers($: EngineInterface) {
   if (!config) return
   const got = await call($, config, 'GET', 'members')
   if (got.ok) {
-    const body = got.body as { members: Member[]; people?: string[]; encrypted?: boolean }
+    const body = got.body as { members: Member[]; people?: string[]; channel?: string; encrypted?: boolean }
     members = body.members
-    if (typeof body.encrypted === 'boolean' && config.encrypted !== body.encrypted) {
-      config = { ...config, encrypted: body.encrypted }
+    const channel = body.channel || config.channel
+    const encrypted = typeof body.encrypted === 'boolean' ? body.encrypted : config.encrypted
+    if (config.channel !== channel || config.encrypted !== encrypted) {
+      config = { ...config, channel, encrypted }
       await remember($, config)
     }
     people = (body.people ?? []).filter(p => !config?.member.startsWith(`${p}.`))

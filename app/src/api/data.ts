@@ -134,6 +134,7 @@ export async function renameChannel(env: Env, userId: string, ref: string, name:
   const clean = name.trim()
   if (!CHANNEL_NAME.test(clean)) throw new UserError(400, 'Channel names are 1-48 letters, digits, spaces, . \' - or _.')
   await env.DB.prepare(`UPDATE channels SET name = ? WHERE id = ?`).bind(clean, channel.id).run()
+  await roomCall(env, channel.id, '/notify', { method: 'POST' })
   return { ...channel, name: clean }
 }
 

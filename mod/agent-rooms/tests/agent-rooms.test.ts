@@ -86,6 +86,7 @@ function world(
           { name: 'bob.mac-111111', login: 'bob', isOnline: true, lastSeen: 1 },
         ],
         people: ['alice', 'bob', 'eve'],
+        channel: 'pairing',
         encrypted,
       })
     if (url.pathname === '/c/devices')
@@ -201,7 +202,6 @@ test('a held message stays hidden while the person decides later', async ($, on)
   const w = world(on, { inbox: [{ seq: 1, id: 'm1', from: 'eve', to: null, text: sealed('dev-eve', 'hi from eve'), sentAt: 1 }] })
   await joined($)
   await settle(() => w.asked.length > 0 && w.sent.some(s => s.path === '/c/ack'))
-  await settle(() => false)
 
   expect(w.trust['dev-eve']).toBeUndefined()
   expect(w.submitted.join()).not.toContain('hi from eve')
@@ -266,7 +266,6 @@ test('a relaunched session leaves a connection another open session is using', a
   await $.session.start({ cwd: '/work', surface: 'terminal', isInteractive: true })
   await $.classic.SessionStart({ source: 'resume', session_title: 'Fix login bug' } as never)
   await settle(() => w.sent.some(s => s.path === '/c/members'))
-  await settle(() => false)
 
   expect(w.sent.some(s => s.path === '/c/messages')).toBe(false)
 })
@@ -281,7 +280,6 @@ test('a plain channel sends text and files as they are, with no device approvals
   expect((ran.result as { success: boolean }).success).toBe(true)
   expect(w.sent.filter(s => s.method === 'POST' && s.path === '/c/messages').at(-1)?.body).toMatchObject({ files: [{ id: 'f1', name: 'shot.png' }] })
   expect(w.helperCalls.some(c => c.path === '/seal')).toBe(false)
-  await settle(() => false)
   expect(w.asked).toEqual([])
 })
 
@@ -323,4 +321,14 @@ test('a session without a device key in an encrypted channel registers one, then
 
   expect(w.sent.find(s => s.path === '/c/device')?.body).toEqual({ device: ME })
   expect(w.submitted[0]).toContain('welcome back')
+})
+
+test('a renamed channel shows its new name', async ($, on) => {
+  const saved = { url: URL, token: 'crt_tok', channel: 'old-name', channelId: 'ch1', member: 'alice', encrypted: true }
+  const w = world(on, { stored: { 'config:sess-1': saved } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await settle(() => w.sent.some(s => s.path === '/c/members'))
+
+  const section = (await $.prompt.compose(COMPOSE)).sections.find(s => s.id === 'agent-rooms:channel')
+  expect(section?.text).toContain('in channel "pairing"')
 })
