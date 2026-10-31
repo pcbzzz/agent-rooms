@@ -52,24 +52,28 @@ async function fromSecret(secret: core.Bytes): Promise<BrowserDevice> {
 
 type PrfResults = { prf?: { enabled?: boolean; results?: { first?: ArrayBuffer } } }
 
-// Unlocks (or first sets up) this browser's device with a passkey. Must run
-// from a click: browsers only show passkey prompts for one.
-export async function unlock(user: { id: string; login: string }): Promise<BrowserDevice> {
+// Unlocks this browser's device with a passkey: the one it used before, or
+// any synced to it from another device (so a passkey made on a Mac is the
+// same device on the iPhone it syncs to). `create` makes a new passkey
+// instead, a new device. Must run from a click: browsers only show passkey
+// prompts for one.
+export async function unlock(user: { id: string; login: string }, create = false): Promise<BrowserDevice> {
   if (unlocked) return unlocked
   const local = safeGet(LOCAL_DEVICE)
-  if (local && !safeGet(PASSKEY)) return finish(user, { ...(JSON.parse(local) as core.Device), kind: 'local' })
+  if (local && !safeGet(PASSKEY) && !create) return finish(user, { ...(JSON.parse(local) as core.Device), kind: 'local' })
 
   const challenge = crypto.getRandomValues(new Uint8Array(32))
   const saved = safeGet(PASSKEY)
   let secret: ArrayBuffer | undefined
-  let credentialId = saved ? core.unb64(saved) : undefined
+  let credentialId = saved && !create ? core.unb64(saved) : undefined
 
-  if (!credentialId) {
+  if (create) {
     const created = (await navigator.credentials.create({
       publicKey: {
         challenge,
         rp: { name: 'Agent Rooms', id: location.hostname },
-        user: { id: new TextEncoder().encode(user.id), name: user.login, displayName: `${user.login} · Agent Rooms` },
+        // A fresh handle each time: one made with the same handle would replace a synced passkey, and with it that device.
+        user: { id: crypto.getRandomValues(new Uint8Array(16)), name: user.login, displayName: `${user.login} · Agent Rooms` },
         pubKeyCredParams: [
           { type: 'public-key', alg: -7 },
           { type: 'public-key', alg: -257 },
@@ -87,15 +91,22 @@ export async function unlock(user: { id: string; login: string }): Promise<Brows
   }
 
   if (!secret) {
-    const got = (await navigator.credentials.get({
-      publicKey: {
-        challenge,
-        rpId: location.hostname,
-        allowCredentials: credentialId ? [{ type: 'public-key', id: credentialId }] : [],
-        userVerification: 'required',
-        extensions: { prf: { eval: { first: SALT } } } as AuthenticationExtensionsClientInputs,
-      },
-    })) as PublicKeyCredential | null
+    // With no credential named, the browser offers every passkey it has for this site, synced ones included.
+    const got = (await navigator.credentials
+      .get({
+        publicKey: {
+          challenge,
+          rpId: location.hostname,
+          allowCredentials: credentialId ? [{ type: 'public-key', id: credentialId }] : [],
+          userVerification: 'required',
+          extensions: { prf: { eval: { first: SALT } } } as AuthenticationExtensionsClientInputs,
+        },
+      })
+      .catch((error: Error) => {
+        if (error.name === 'NotAllowedError' && !credentialId) throw new Error('No passkey was picked. If this device has none for Agent Rooms yet, create one.')
+        throw error
+      })) as PublicKeyCredential | null
+    if (got && !credentialId) safeSet(PASSKEY, core.b64(new Uint8Array(got.rawId)))
     secret = (got?.getClientExtensionResults() as PrfResults | undefined)?.prf?.results?.first
     if (!secret) throw new Error("This passkey can't unlock encryption here. Try a browser with passkey PRF support (recent Chrome, Safari or Edge).")
   }

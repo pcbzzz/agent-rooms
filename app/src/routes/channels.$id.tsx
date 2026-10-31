@@ -20,12 +20,12 @@ function ChannelPage() {
   const [error, setError] = useState<string>()
   const [dialog, setDialog] = useState<'rename' | 'encrypt' | 'delete'>()
 
-  const unlock = async () => {
+  const unlock = async (create = false) => {
     const user = me.data?.user
     if (!user) return
     setError(undefined)
     try {
-      const unlocked = await e2e.unlock(user)
+      const unlocked = await e2e.unlock(user, create)
       await api(`/channels/${id}/devices`, { method: 'POST', body: { device: unlocked.id } })
       setDevice(unlocked)
       devs.reload()
@@ -263,7 +263,7 @@ function Devices({
   device: e2e.BrowserDevice | undefined
   trustTick: number
   onDecide: (d: e2e.ChannelDevice, decision: 'approved' | 'denied' | 'undecided') => void
-  onUnlock: () => void
+  onUnlock: (create?: boolean) => void
 }) {
   void trustTick
   return (
@@ -276,10 +276,8 @@ function Devices({
       </div>
       {!device && (
         <div className="unlock">
-          <p>Unlock this browser to read messages and approve devices.</p>
-          <button className="primary small" onClick={onUnlock}>
-            <Icon name="key" size={14} /> {e2e.hasPasskey() ? 'Unlock' : 'Set up a passkey'}
-          </button>
+          <p>Unlock this browser to read messages and approve devices. A passkey synced from another device unlocks it as that same device.</p>
+          <UnlockButtons onUnlock={onUnlock} />
         </div>
       )}
       <ul className="list">
@@ -332,6 +330,24 @@ function Devices({
   )
 }
 
+// Unlock with a passkey this browser has, synced ones included; or make a new one, which is a new device.
+function UnlockButtons({ onUnlock }: { onUnlock: (create?: boolean) => void }) {
+  return (
+    <span className="row" style={{ gap: 6 }}>
+      <button className="primary small" onClick={() => onUnlock()}>
+        <Icon name="key" size={14} /> Unlock
+      </button>
+      {!e2e.hasPasskey() && (
+        <Tip label="Makes a new device, which others approve again">
+          <button className="small ghost" onClick={() => onUnlock(true)}>
+            New passkey
+          </button>
+        </Tip>
+      )}
+    </span>
+  )
+}
+
 // Newest first, with the composer on top. Opened in the browser, never on the server.
 function Messages({
   channelId,
@@ -347,7 +363,7 @@ function Messages({
   devices: e2e.ChannelDevice[]
   device: e2e.BrowserDevice | undefined
   trustTick: number
-  onUnlock: () => void
+  onUnlock: (create?: boolean) => void
   encrypted: boolean
 }) {
   const history = useApi<{ messages: Message[] }>(`/channels/${channelId}/messages?limit=100`)
@@ -494,9 +510,7 @@ function Messages({
         <div className="locked">
           <Icon name="lock" size={18} />
           <span className="grow">Messages are end-to-end encrypted. Unlock this browser to read and send them.</span>
-          <button className="primary small" onClick={onUnlock}>
-            <Icon name="key" size={14} /> {e2e.hasPasskey() ? 'Unlock' : 'Set up a passkey'}
-          </button>
+          <UnlockButtons onUnlock={onUnlock} />
         </div>
       )}
       {error && <div className="error" style={{ margin: 12 }}>{error}</div>}
