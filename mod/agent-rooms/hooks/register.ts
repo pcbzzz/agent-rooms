@@ -676,7 +676,11 @@ async function send($: EngineInterface, target: string, text: string, files: str
   }
 
   const reached = r.devices.filter(d => d.id !== device!.id && (to === null || d.sessions.includes(to) || d.login === to))
-  const approved = reached.filter(d => r.trust[d.id]?.decision === 'approved')
+  // A direct message also goes to both people's other devices, so their browsers can read it.
+  const people = to === null ? [] : [loginOf(to), loginOf(c.member)]
+  const copies = r.devices.filter(d => d.id !== device!.id && !reached.includes(d) && people.includes(d.login))
+  const isApproved = (d: ChannelDevice) => r.trust[d.id]?.decision === 'approved'
+  const approved = reached.filter(isApproved)
   const waiting = reached.filter(d => !r.trust[d.id])
   if (approved.length === 0 && reached.length > 0)
     return {
@@ -687,7 +691,7 @@ async function send($: EngineInterface, target: string, text: string, files: str
   try {
     const { envelope } = await helper<{ envelope: unknown }>($, 'POST', '/seal', {
       channelId: c.channelId,
-      recipients: approved.map(d => ({ id: d.id, encPub: d.encPub })),
+      recipients: [...approved, ...copies.filter(isApproved)].map(d => ({ id: d.id, encPub: d.encPub })),
       text,
       files,
       server: { url: c.url, token: c.token },
@@ -843,6 +847,8 @@ function sessionName(): string {
   return `${title || 'session'}-${id}`
 }
 
+// A session's name starts with its person's login: `bob.mac-1a2b3c`.
+const loginOf = (name: string) => name.split('.')[0] ?? name
 const fingerprint = (id: string) => (id.toUpperCase().match(/.{4}/g) ?? []).slice(0, 6).join(' ')
 const describe = (d: ChannelDevice) => (d.kind === 'browser' ? `${d.login}'s browser` : `${d.login}'s device "${d.label}"`)
 

@@ -394,11 +394,15 @@ function Messages({
       return
     }
     const reached = devices.filter(d => d.id !== device?.id && (target === null || d.sessions.includes(target) || d.login === target))
-    const approved = reached.filter(d => e2e.decisionFor(channelId, d.id)?.decision === 'approved')
+    // A direct message also goes to both people's other devices, so each can read it everywhere.
+    const people = target === null ? [] : [splitAddress(target).login, devices.find(d => d.id === device?.id)?.login]
+    const isApproved = (d: e2e.ChannelDevice) => e2e.decisionFor(channelId, d.id)?.decision === 'approved'
+    const copies = devices.filter(d => d.id !== device?.id && !reached.includes(d) && people.includes(d.login) && isApproved(d))
+    const approved = reached.filter(isApproved)
     if (reached.length > 0 && approved.length === 0) return setError('None of the devices this would reach is approved yet. Approve them under Devices first.')
     setSending(true)
     try {
-      const { envelope, device: from } = await e2e.sealMessage(channelId, approved, text, files)
+      const { envelope, device: from } = await e2e.sealMessage(channelId, [...approved, ...copies], text, files)
       await api(`/channels/${channelId}/messages`, { method: 'POST', body: { envelope, device: from, to: target ?? undefined } })
       setText('')
       setFiles([])

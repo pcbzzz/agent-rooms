@@ -20,6 +20,7 @@ function world(
     answer?: string
     encrypted?: boolean | { encrypted: boolean }
     keyless?: boolean
+    extraDevices?: unknown[]
   } = {},
 ) {
   const sent: Sent[] = []
@@ -92,7 +93,7 @@ function world(
         encrypted,
       })
     if (url.pathname === '/c/devices')
-      return reply({ devices: [{ ...ME, kind: 'cli', login: 'alice', sessions: ['alice'], isOnline: true }, device('dev-bob', 'bob', ['bob.mac-111111']), device('dev-eve', 'eve', [])] })
+      return reply({ devices: [{ ...ME, kind: 'cli', login: 'alice', sessions: ['alice'], isOnline: true }, device('dev-bob', 'bob', ['bob.mac-111111']), device('dev-eve', 'eve', []), ...(opts.extraDevices ?? [])] })
     if (url.pathname === '/c/messages' && method === 'GET') {
       const messages = pending
       pending = []
@@ -362,4 +363,16 @@ test('connections saved by 0.2, one per session, still load', async ($, on) => {
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   await settle(() => w.helperCalls.some(c => c.path === '/connect'))
   expect(w.helperCalls.find(c => c.path === '/connect')?.body).toMatchObject({ channel: 'ch1', token: 'crt_tok' })
+})
+
+test("a direct message is also encrypted to both people's other approved devices", async ($, on) => {
+  const w = world(on, {
+    extraDevices: [device('dev-my-browser', 'alice', [], 'browser'), device('dev-bob-browser', 'bob', [], 'browser')],
+    trust: { 'dev-bob': { decision: 'approved' }, 'dev-my-browser': { decision: 'approved' }, 'dev-bob-browser': { decision: 'approved' }, 'dev-eve': { decision: 'approved' } },
+  })
+  await joined($)
+
+  expect(await $.session.send({ to: 'room:bob.mac-111111', text: 'just you' } as never)).toEqual({ isDelivered: true })
+  const ids = (w.helperCalls.find(c => c.path === '/seal')?.body as { recipients: { id: string }[] }).recipients.map(r => r.id)
+  expect(ids.sort()).toEqual(['dev-bob', 'dev-bob-browser', 'dev-my-browser'])
 })

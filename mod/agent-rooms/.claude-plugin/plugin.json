@@ -1,6 +1,6 @@
 {
   "name": "agent-rooms",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Connect Claude Code sessions on different machines through Agent Rooms channels, as SendMessage and ListAgents peers",
   "author": { "name": "pcbzzz", "url": "https://github.com/pcbzzz" },
   "homepage": "https://github.com/pcbzzz/agent-rooms",
