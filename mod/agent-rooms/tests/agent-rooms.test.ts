@@ -6,7 +6,7 @@ const CLAIM = `${URL}/c/claim/abc123`
 const ME = { id: 'dev-me', signPub: 's', encPub: 'e', label: 'laptop' }
 const device = (id: string, login: string, sessions: string[], kind = 'cli') => ({ id, login, sessions, kind, label: `${login}-mac`, signPub: 's', encPub: `enc-${id}`, isOnline: true })
 
-type Sent = { method: string; path: string; body: unknown }
+type Sent = { method: string; path: string; body: unknown; token?: string }
 
 // The engine beneath the plugin: a fake channel server, a fake helper on its
 // socket, and the person answering the approval dialog.
@@ -72,13 +72,15 @@ function world(
       return reply({ ok: true })
     }
 
-    sent.push({ method, path: url.pathname, body })
+    const token = (e.init?.headers as Record<string, string> | undefined)?.Authorization?.replace('Bearer ', '')
+    sent.push({ method, path: url.pathname, body, token })
     // A connection with no device key in an encrypted channel may only register one.
     if (url.pathname === '/c/device') return (keyless.value = false), reply({ device: body.device.id })
     if (keyless.value && url.pathname.startsWith('/c/') && !url.pathname.startsWith('/c/claim/'))
       return reply({ error: 'This channel is end-to-end encrypted: register this device first.', code: 'device_required' }, 403)
     const encrypted = typeof opts.encrypted === 'object' ? opts.encrypted.encrypted : (opts.encrypted ?? true)
     if (url.pathname === '/c/claim/abc123') return reply({ token: 'crt_tok', channelId: 'ch1', channel: 'pairing', member: 'alice', url: URL, encrypted })
+    if (url.pathname === '/c/claim/def456') return reply({ token: 'crt_tok2', channelId: 'ch2', channel: 'Infra Team', member: 'alice', url: URL, encrypted })
     if (url.pathname === '/c/members')
       return reply({
         members: [
@@ -86,7 +88,7 @@ function world(
           { name: 'bob.mac-111111', login: 'bob', isOnline: true, lastSeen: 1 },
         ],
         people: ['alice', 'bob', 'eve'],
-        channel: 'pairing',
+        channel: token === 'crt_tok2' ? 'Infra Team' : 'pairing',
         encrypted,
       })
     if (url.pathname === '/c/devices')
@@ -106,7 +108,8 @@ function world(
       asked.push(question)
       return { result: { questions: [], answers: { [question]: opts.answer ?? 'Decide later' } } } as never
     }
-    return { result: {}, text: `Created channel "pairing".\nagent-rooms-claim: ${CLAIM}\n` } as never
+    const claim = (e as unknown as { channel?: string }).channel === 'infra' ? `${URL}/c/claim/def456` : CLAIM
+    return { result: {}, text: `Created channel.\nagent-rooms-claim: ${claim}\n` } as never
   })
   return { sent, helperCalls, submitted, appended, asked, trust }
 }
@@ -142,7 +145,7 @@ test('join_channel connects this session as itself, with this device', async ($,
   expect(ran.context?.join('\n')).toContain('now in channel "pairing" as room:alice')
   expect((await $.prompt.compose(COMPOSE)).sections.some(s => s.id === 'agent-rooms:channel')).toBe(true)
   await settle(() => w.helperCalls.some(c => c.path === '/connect'))
-  expect(w.helperCalls.find(c => c.path === '/connect')?.body).toEqual({ wsUrl: 'wss://rooms.test/c/ws', token: 'crt_tok' })
+  expect(w.helperCalls.find(c => c.path === '/connect')?.body).toEqual({ channel: 'ch1', wsUrl: 'wss://rooms.test/c/ws', token: 'crt_tok' })
 })
 
 test('messages are encrypted only to approved devices', async ($, on) => {
@@ -246,7 +249,7 @@ test('a message arriving mid-turn joins that turn, and marks it', async ($, on) 
 
   await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1, isAborted: false } as never)
   await settle(() => w.submitted.length > 0)
-  expect(w.submitted[0]).toContain('1 message arrived as your last turn ended')
+  expect(w.submitted[0]).toContain('1 channel message arrived as your last turn ended')
 })
 
 test('a relaunched session with a new id reconnects by its title', async ($, on) => {
@@ -331,4 +334,32 @@ test('a renamed channel shows its new name', async ($, on) => {
 
   const section = (await $.prompt.compose(COMPOSE)).sections.find(s => s.id === 'agent-rooms:channel')
   expect(section?.text).toContain('in channel "pairing"')
+})
+
+test('a session in two channels names the channel in every address', async ($, on) => {
+  const w = world(on)
+  await joined($)
+  const second = await $.tool.call({ tool: 'mcp__agent-rooms__join_channel', channel: 'infra' } as never)
+  expect(second.context?.join('\n')).toContain('now in channel "Infra Team" as room:infra-team/alice')
+  const section = (await $.prompt.compose(COMPOSE)).sections.find(s => s.id === 'agent-rooms:channel')
+  expect(section?.text).toContain('room:<channel>/<name>')
+
+  const bare = await $.session.send({ to: 'room:*', text: 'which one?' } as never)
+  expect(bare).toMatchObject({ isDelivered: false })
+  expect((bare as { reason: string }).reason).toContain('room:pairing/* or room:infra-team/*')
+
+  expect(await $.session.send({ to: 'room:infra-team/bob.mac-111111', text: 'hi infra' } as never)).toEqual({ isDelivered: true })
+  const seal = w.helperCalls.filter(c => c.path === '/seal').at(-1)
+  expect(seal?.body).toMatchObject({ channelId: 'ch2', text: 'hi infra' })
+  expect(w.sent.filter(s => s.path === '/c/messages' && s.method === 'POST').at(-1)?.token).toBe('crt_tok2')
+  // Joining the second channel kept the first.
+  expect(w.sent.some(s => s.path === '/c/leave')).toBe(false)
+})
+
+test('connections saved by 0.2, one per session, still load', async ($, on) => {
+  const saved = { url: URL, token: 'crt_tok', channel: 'pairing', channelId: 'ch1', member: 'alice', encrypted: true }
+  const w = world(on, { stored: { 'config:sess-1': saved } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await settle(() => w.helperCalls.some(c => c.path === '/connect'))
+  expect(w.helperCalls.find(c => c.path === '/connect')?.body).toMatchObject({ channel: 'ch1', token: 'crt_tok' })
 })

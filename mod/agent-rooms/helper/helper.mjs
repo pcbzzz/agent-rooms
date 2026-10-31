@@ -3,8 +3,8 @@
 // - Holds this device's keys and its approved-device list, in files only you
 //   can read (~/.claude/agent-rooms), and does all encryption with them.
 // - Serves that to the plugin over a Unix socket (HTTP + JSON), mode 0600.
-// - Holds the channel's WebSocket and prints one JSON line per event:
-//   {"type":"wake"}, {"type":"presence",...}, {"type":"status","state":...}.
+// - Holds a WebSocket per channel and prints one JSON line per event, naming
+//   the channel: {"type":"wake","channel":...}, {"type":"status","state":...}.
 //
 // Usage: node helper.mjs <socket path>
 
@@ -145,8 +145,9 @@ const routes = {
     ),
   }),
 
-  'POST /connect': async body => (openSocket(body.wsUrl, body.token), { ok: true }),
-  'POST /disconnect': async () => (closeSocket(), { ok: true }),
+  'POST /connect': async body => (openSocket(body.channel, body.wsUrl, body.token), { ok: true }),
+  // Without a channel, closes them all.
+  'POST /disconnect': async body => (body.channel ? closeSocket(body.channel) : [...sockets.keys()].forEach(closeSocket), { ok: true }),
 }
 
 const httpServer = createServer(async (req, res) => {
@@ -180,65 +181,64 @@ process.on('SIGINT', cleanup)
 // The plugin holds our stdout; when it goes away, so do we.
 process.stdout.on('error', cleanup)
 
-// --- the channel's WebSocket ---------------------------------------------------------
+// --- the channels' WebSockets ---------------------------------------------------------
 
-let ws
-let wsTarget
-let delay = 1000
-let retry
+// channel id -> { ws, url, token, delay, retry }
+const sockets = new Map()
 
-function openSocket(url, token) {
-  closeSocket()
-  wsTarget = { url, token }
-  connectSocket()
+function openSocket(channel, url, token) {
+  closeSocket(channel)
+  const target = { url, token, delay: 1000 }
+  sockets.set(channel, target)
+  connectSocket(channel, target)
 }
 
-function closeSocket() {
-  wsTarget = undefined
-  clearTimeout(retry)
-  ws?.close()
-  ws = undefined
+function closeSocket(channel) {
+  const target = sockets.get(channel)
+  if (!target) return
+  sockets.delete(channel)
+  clearTimeout(target.retry)
+  target.ws?.close()
 }
 
-function connectSocket() {
-  if (!wsTarget) return
-  const target = wsTarget
+function connectSocket(channel, target) {
+  if (sockets.get(channel) !== target) return
   // The token rides as the subprotocol: WebSocket clients cannot set headers.
   const socket = new WebSocket(target.url, [target.token])
-  ws = socket
+  target.ws = socket
   let ping
   socket.addEventListener('open', () => {
-    delay = 1000
-    emit({ type: 'status', state: 'open' })
+    target.delay = 1000
+    emit({ type: 'status', state: 'open', channel })
     ping = setInterval(() => socket.send('ping'), 30_000)
   })
   socket.addEventListener('message', ({ data }) => {
     if (data === 'pong') return
     try {
-      emit(JSON.parse(String(data)))
+      emit({ ...JSON.parse(String(data)), channel })
     } catch {
       // Not ours.
     }
   })
   socket.addEventListener('close', ({ code }) => {
     clearInterval(ping)
-    if (ws !== socket) return
+    if (sockets.get(channel) !== target || target.ws !== socket) return
     // The channel became encrypted and this connection has no device key yet: the
     // plugin registers one, then asks for the socket again.
     if (code === 4003) {
-      emit({ type: 'status', state: 'device-required' })
-      wsTarget = undefined
+      sockets.delete(channel)
+      emit({ type: 'status', state: 'device-required', channel })
       return
     }
     // 4001: disconnected; 4002: another session took this name; 4000: channel deleted.
     if (code === 4000 || code === 4001 || code === 4002) {
-      emit({ type: 'status', state: 'revoked', code })
-      wsTarget = undefined
+      sockets.delete(channel)
+      emit({ type: 'status', state: 'revoked', code, channel })
       return
     }
-    emit({ type: 'status', state: 'closed' })
-    retry = setTimeout(connectSocket, delay)
-    delay = Math.min(delay * 2, 30_000)
+    emit({ type: 'status', state: 'closed', channel })
+    target.retry = setTimeout(() => connectSocket(channel, target), target.delay)
+    target.delay = Math.min(target.delay * 2, 30_000)
   })
   socket.addEventListener('error', () => {
     // 'close' follows and schedules the retry.
