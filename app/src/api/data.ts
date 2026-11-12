@@ -6,7 +6,7 @@ import type { RoomMessage } from '../room'
 
 export class UserError extends Error {
   constructor(
-    readonly status: 400 | 401 | 403 | 404 | 409,
+    readonly status: 400 | 401 | 403 | 404 | 409 | 410,
     message: string,
   ) {
     super(message)
@@ -158,6 +158,7 @@ export async function deleteChannel(env: Env, userId: string, ref: string) {
   const channel = await channelFor(env, userId, ref, true)
   await env.DB.prepare(`DELETE FROM channels WHERE id = ?`).bind(channel.id).run()
   await roomCall(env, channel.id, '/destroy', { method: 'POST' })
+  await deleteFiles(env, `${channel.id}/`)
   return channel
 }
 
@@ -414,16 +415,29 @@ export async function deviceState(env: Env, userId: string, id: string, blob?: s
 
 // Anyone can send files up to 10 MB in one request. Bigger ones, up to 2 GB,
 // go up in parts (an R2 multipart upload), and only users with big_files set
-// may send or fetch them.
+// may send or fetch them. Each file says how long to keep it, a week at most;
+// after that it's refused, and the hourly cron deletes it.
 const MAX_FILE = 10 * 1024 * 1024 + 64
 const MAX_BIG_FILE = 2 * 1024 * 1024 * 1024 + 64 * 1024
 const MAX_PART = 16 * 1024 * 1024
 
-export async function putFile(env: Env, channelId: string, body: ArrayBuffer) {
+const WEEK = 7 * 24 * 60 * 60 * 1000
+
+// When a file kept for `keep` seconds expires: a minute to a week; a week when not said.
+function expiry(keep: unknown) {
+  const seconds = Number(keep)
+  const ms = Number.isFinite(seconds) && seconds > 0 ? Math.min(Math.max(seconds * 1000, 60_000), WEEK) : WEEK
+  return now() + ms
+}
+
+const expiresAt = (object: R2Object) => Number(object.customMetadata?.expires) || object.uploaded.getTime() + WEEK
+
+export async function putFile(env: Env, channelId: string, body: ArrayBuffer, keep?: unknown) {
   if (body.byteLength === 0 || body.byteLength > MAX_FILE) throw new UserError(400, 'Files are up to 10 MB.')
   const id = randomId(18)
-  await env.FILES.put(`${channelId}/${id}`, body)
-  return { id }
+  const expires = expiry(keep)
+  await env.FILES.put(`${channelId}/${id}`, body, { customMetadata: { expires: String(expires) } })
+  return { id, expires }
 }
 
 async function checkBigFiles(env: Env, userId: string) {
@@ -431,12 +445,13 @@ async function checkBigFiles(env: Env, userId: string) {
   if (!user?.big_files) throw new UserError(403, 'Files over 10 MB are limited to some accounts on this server.')
 }
 
-export async function startUpload(env: Env, userId: string, channelId: string, size: number) {
+export async function startUpload(env: Env, userId: string, channelId: string, size: number, keep?: unknown) {
   await checkBigFiles(env, userId)
   if (!Number.isFinite(size) || size <= 0 || size > MAX_BIG_FILE) throw new UserError(400, 'Files are up to 2 GB.')
   const id = randomId(18)
-  const upload = await env.FILES.createMultipartUpload(`${channelId}/${id}`)
-  return { id, uploadId: upload.uploadId }
+  const expires = expiry(keep)
+  const upload = await env.FILES.createMultipartUpload(`${channelId}/${id}`, { customMetadata: { expires: String(expires) } })
+  return { id, uploadId: upload.uploadId, expires }
 }
 
 export async function uploadPart(env: Env, userId: string, channelId: string, id: string, uploadId: string, part: number, body: ArrayBuffer) {
@@ -456,7 +471,7 @@ export async function completeUpload(env: Env, userId: string, channelId: string
     await env.FILES.delete(`${channelId}/${id}`)
     throw new UserError(400, 'Files are up to 2 GB.')
   }
-  return { id }
+  return { id, expires: expiresAt(object) }
 }
 
 // `range`: a request's Range header; one `bytes=a-b` range is served, so big files download in parallel pieces.
@@ -465,6 +480,10 @@ export async function getFile(env: Env, userId: string, channelId: string, id: s
   const key = `${channelId}/${id}`
   const head = await env.FILES.head(key)
   if (!head) throw new UserError(404, 'No such file.')
+  if (expiresAt(head) <= now()) {
+    await env.FILES.delete(key)
+    throw new UserError(410, 'This file expired.')
+  }
   if (head.size > MAX_FILE) await checkBigFiles(env, userId)
   const headers = { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'private, max-age=86400', 'Accept-Ranges': 'bytes' }
   const wanted = range?.match(/^bytes=(\d+)-(\d*)$/)
@@ -479,6 +498,20 @@ export async function getFile(env: Env, userId: string, channelId: string, id: s
   const object = await env.FILES.get(key)
   if (!object) throw new UserError(404, 'No such file.')
   return new Response(object.body, { headers: { ...headers, 'Content-Length': String(object.size) } })
+}
+
+// The hourly cron: deletes every attachment past its expiry.
+export const deleteExpiredFiles = (env: Env) => deleteFiles(env, undefined, o => expiresAt(o) <= now())
+
+// Deletes the attachments under `prefix` (all of them, without one) that `which` picks.
+async function deleteFiles(env: Env, prefix?: string, which: (o: R2Object) => boolean = () => true) {
+  let cursor: string | undefined
+  do {
+    const page = await env.FILES.list({ prefix, cursor, limit: 1000, include: ['customMetadata'] })
+    const doomed = page.objects.filter(which).map(o => o.key)
+    if (doomed.length) await env.FILES.delete(doomed)
+    cursor = page.truncated ? page.cursor : undefined
+  } while (cursor)
 }
 
 // Who a message in the channel may be addressed to: a connected session, or

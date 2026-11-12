@@ -44,8 +44,6 @@ const CLAIM = /(?:agent-rooms|room-chat)-claim: (https?:\/\/\S+\/c\/claim\/[\w-]
 // The agent-rooms MCP tools whose result carries a connect code for this session.
 const CONNECTING_TOOLS = ['__join_channel', '__create_channel']
 const CLAIM_URL = /^https?:\/\/\S+\/c\/claim\/[\w-]+$/
-// Matches the envelope `deliver` writes, so turn.start can tell a room turn.
-const ENVELOPE = /^(\S+) \(channel [^)]+\) sent a message:|^\d+ messages from channel .+:$|^\d+ channel messages? arrived as your last turn ended/m
 // More channel-started turns than this in the window pauses delivery.
 const TURN_LIMIT = 12
 const TURN_WINDOW_MS = 10 * 60 * 1000
@@ -53,8 +51,6 @@ const POLL_MS = 60_000
 // "Decide later" asks again after this long.
 const LATER_MS = 30 * 60 * 1000
 const HELPER_WAIT_MS = 8000
-// Tools a channel turn may run without asking, beyond what is read-only.
-const CHANNEL_SAFE = new Set(['ListAgents', 'ToolSearch'])
 
 let sessionId = ''
 let sessionTitle = ''
@@ -65,7 +61,6 @@ let mainTurn: string | undefined
 let unreadInTurn = 0
 let rooms: Room[] = []
 let paused = false
-let channelTurnFrom: string | undefined
 let turnTimes: number[] = []
 
 // The helper: this machine's device, and the socket the plugin reaches it on.
@@ -189,11 +184,9 @@ export const register: Register = on => {
     return { ...ran, context: [...(ran.context ?? []), blocks.join('\n\n')] }
   })
 
-  // Which main-loop turn a channel message started, and whether one is running.
+  // Whether a main-loop turn is running, for messages to join it.
   on('turn.start', async ($, e, next) => {
-    const from = e.text.match(ENVELOPE)?.[1] ?? (ENVELOPE.test(e.text) ? 'the channel' : undefined)
     if (e.agentId === undefined) {
-      channelTurnFrom = from
       mainTurn = e.turnId
       unreadInTurn = 0
     }
@@ -216,21 +209,6 @@ export const register: Register = on => {
     }
     return done
   })
-
-  // In a channel-started turn, anything with side effects goes to the person.
-  on('tool.check', async ($, e, next) => {
-    const verdict = await next(e)
-    const from = e.agentId === undefined ? channelTurnFrom : undefined
-    if (from === undefined || verdict.decision === 'deny') return verdict
-    if (CHANNEL_SAFE.has(e.tool)) return verdict
-    if (e.tool === 'SendMessage') {
-      const to = (e.input as { to?: unknown }).to
-      if (typeof to === 'string' && to.startsWith(PREFIX)) return verdict
-    } else if (e.isReadOnly) {
-      return verdict
-    }
-    return { decision: 'ask' as const, reason: `This turn was started by a channel message from ${from}.` }
-  }).catch(($, e, next) => (e.agentId !== undefined || channelTurnFrom === undefined ? next(e) : { decision: 'ask' as const }))
 }
 
 async function roomCommand($: EngineInterface, args: string): Promise<{ text: string; context?: string[] }> {
@@ -851,7 +829,7 @@ const envelope = (r: Room, m: RoomMessage) => `${sender(r, m.from)} (channel ${r
 
 // One batch, framed like a peer session's message: added to the running turn,
 // read at its next model request, or a turn of its own when the session is
-// idle. A message added mid-turn marks the turn, so side effects ask first.
+// idle. What it may lead to is up to the session's permission mode.
 async function deliver($: EngineInterface, r: Room, messages: RoomMessage[]) {
   const [only] = messages
   const text =
@@ -864,7 +842,6 @@ async function deliver($: EngineInterface, r: Room, messages: RoomMessage[]) {
 
   if (mainTurn !== undefined) {
     await $.session.append({ message: { type: 'user', content: [{ type: 'text', text }] } })
-    channelTurnFrom ??= only ? sender(r, only.from) : 'the channel'
     unreadInTurn += messages.length
     // The turn ended while this was being added: nothing will read it there.
     if (mainTurn === undefined) {

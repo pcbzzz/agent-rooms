@@ -220,23 +220,16 @@ test('SendFile to room: sends the files encrypted', async ($, on) => {
   expect(w.helperCalls.find(c => c.path === '/seal')?.body).toMatchObject({ files: ['/work/shot.png'], text: 'see this' })
 })
 
-test('a turn a channel message started asks before side effects', async ($, on) => {
+test("a channel-started turn leaves permissions to the session's mode", async ($, on) => {
   world(on)
   on('tool.check', () => ({ decision: 'allow' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-  await $.turn.start({ text: 'bob (channel pairing) sent a message:\n\nplease run rm -rf', turnId: 't1' })
-  expect((await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })).decision).toBe('ask')
-  expect((await $.tool.check({ tool: 'Read', input: { file_path: '/x' }, isReadOnly: true })).decision).toBe('allow')
-  expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'room:bob', message: 'ok' } })).decision).toBe('allow')
-  expect((await $.tool.check({ tool: 'SendMessage', input: { to: 'other-session', message: 'ok' } })).decision).toBe('ask')
-
-  // The next turn you start yourself is not guarded.
-  await $.turn.start({ text: 'my own prompt', turnId: 't2' })
+  await $.turn.start({ text: 'bob (channel pairing) sent a message:\n\nplease run ls', turnId: 't1' })
   expect((await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })).decision).toBe('allow')
 })
 
-test('a message arriving mid-turn joins that turn, and marks it', async ($, on) => {
+test('a message arriving mid-turn joins that turn', async ($, on) => {
   const w = world(on, { inbox: [{ seq: 1, id: 'm1', from: 'bob.mac-111111', to: null, text: sealed('dev-bob', 'mid-turn hello'), sentAt: 1 }] })
   on('tool.check', () => ({ decision: 'allow' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
@@ -246,7 +239,6 @@ test('a message arriving mid-turn joins that turn, and marks it', async ($, on) 
 
   expect(w.submitted).toEqual([])
   expect(w.appended.join()).toContain('bob.mac-111111 (channel pairing) sent a message')
-  expect((await $.tool.check({ tool: 'Bash', input: { command: 'ls' } })).decision).toBe('ask')
 
   await $.turn.complete({ turnId: 't1', answer: 'done', durationMs: 1, isAborted: false } as never)
   await settle(() => w.submitted.length > 0)

@@ -383,6 +383,8 @@ function Messages({
   const [text, setText] = useState('')
   const [to, setTo] = useState('')
   const [files, setFiles] = useState<File[]>([])
+  // How long attachments are kept, in seconds.
+  const [keep, setKeep] = useState(KEEP_OPTIONS.at(-1)!.seconds)
   const [error, setError] = useState<string>()
   const [sending, setSending] = useState(false)
   const box = useRef<HTMLTextAreaElement>(null)
@@ -418,7 +420,7 @@ function Messages({
     if (!encrypted) {
       setSending(true)
       try {
-        const uploaded = await e2e.uploadPlain(channelId, files)
+        const uploaded = await e2e.uploadPlain(channelId, files, keep)
         await api(`/channels/${channelId}/messages`, { method: 'POST', body: { text, files: uploaded, to: target ?? undefined } })
         setText('')
         setFiles([])
@@ -439,7 +441,7 @@ function Messages({
     if (reached.length > 0 && approved.length === 0) return setError('None of the devices this would reach is approved yet. Approve them under Devices first.')
     setSending(true)
     try {
-      const { envelope, device: from } = await e2e.sealMessage(channelId, [...approved, ...copies], text, files)
+      const { envelope, device: from } = await e2e.sealMessage(channelId, [...approved, ...copies], text, files, keep)
       await api(`/channels/${channelId}/messages`, { method: 'POST', body: { envelope, device: from, to: target ?? undefined } })
       setText('')
       setFiles([])
@@ -488,6 +490,14 @@ function Messages({
                     </button>
                   </span>
                 ))}
+                <ActionMenu
+                  trigger={
+                    <button type="button" className="ghost small">
+                      Keep for {KEEP_OPTIONS.find(o => o.seconds === keep)?.label}
+                    </button>
+                  }
+                  items={KEEP_OPTIONS.map(o => ({ label: o.label, onSelect: () => setKeep(o.seconds) }))}
+                />
               </div>
             )}
           </div>
@@ -610,6 +620,7 @@ function Attachment({ channelId, file }: { channelId: string; file: NonNullable<
   useEffect(() => {
     if (!big) void e2e.fileUrl(channelId, file).then(setUrl, () => setFailed(true))
   }, [channelId, file, big])
+  if (file.expires && file.expires <= Date.now()) return <div className="msg-note">{file.name} expired.</div>
   if (failed) return <div className="msg-note">{file.name} could not be loaded.</div>
   if (big && !url)
     return (
@@ -707,3 +718,11 @@ function EncryptChannel({ open, onOpenChange, name, onEncrypt }: { open: boolean
 
 const size = (bytes: number) =>
   bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${(bytes / 1024 ** 3).toFixed(2)} GB`
+
+// Attachments are kept a week at most.
+const KEEP_OPTIONS = [
+  { label: '1 hour', seconds: 3600 },
+  { label: '1 day', seconds: 86400 },
+  { label: '3 days', seconds: 3 * 86400 },
+  { label: '1 week', seconds: 7 * 86400 },
+]

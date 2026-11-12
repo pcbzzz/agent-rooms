@@ -140,22 +140,23 @@ async function server(s, path, init = {}) {
 
 const octets = { 'Content-Type': 'application/octet-stream' }
 
-// Uploads a file, encrypted unless `encrypt` is false. Up to 10 MB it goes in
-// one request (encrypted whole, which older plugins read too); bigger, in
-// FILE_CHUNK pieces, each encrypted on its own.
-async function upload(s, path, encrypt) {
+// Uploads a file, encrypted unless `encrypt` is false, kept `keep` seconds (a
+// week at most, and when not said). Up to 10 MB it goes in one request
+// (encrypted whole, which older plugins read too); bigger, in FILE_CHUNK
+// pieces, each encrypted on its own.
+async function upload(s, path, encrypt, keep) {
   const size = statSync(path).size
   if (size > MAX_FILE) throw new Error(`${basename(path)} is over 2 GB`)
   const meta = { name: basename(path), type: mimeOf(path), size }
+  const query = keep ? `?keep=${encodeURIComponent(keep)}` : ''
   if (size <= ONE_REQUEST) {
     const bytes = readFileSync(path)
-    if (!encrypt) return { id: (await (await server(s, 'files', { method: 'POST', body: bytes, headers: octets })).json()).id, ...meta }
-    const sealed = await core.encryptFile(bytes)
-    const { id } = await (await server(s, 'files', { method: 'POST', body: sealed.ct, headers: octets })).json()
-    return { id, ...meta, key: sealed.key, iv: sealed.iv }
+    const sealed = encrypt ? await core.encryptFile(bytes) : undefined
+    const { id, expires } = await (await server(s, `files${query}`, { method: 'POST', body: sealed?.ct ?? bytes, headers: octets })).json()
+    return { id, ...meta, expires, ...(sealed ? { key: sealed.key, iv: sealed.iv } : {}) }
   }
   const fileKey = encrypt ? await core.newFileKey() : undefined
-  const { id, uploadId } = await (await server(s, 'uploads', { method: 'POST', body: JSON.stringify({ size }), headers: { 'Content-Type': 'application/json' } })).json()
+  const { id, uploadId } = await (await server(s, 'uploads', { method: 'POST', body: JSON.stringify({ size, keep }), headers: { 'Content-Type': 'application/json' } })).json()
   const fd = openSync(path, 'r')
   const count = core.chunkCount(size)
   const parts = new Array(count)
@@ -170,13 +171,9 @@ async function upload(s, path, encrypt) {
   } finally {
     closeSync(fd)
   }
-  await server(s, `uploads/${id}`, { method: 'POST', body: JSON.stringify({ uploadId, parts }), headers: { 'Content-Type': 'application/json' } })
-  return { id, ...meta, ...(fileKey ? { ...fileKey, chunk: core.FILE_CHUNK } : {}) }
+  const done = await server(s, `uploads/${id}`, { method: 'POST', body: JSON.stringify({ uploadId, parts }), headers: { 'Content-Type': 'application/json' } })
+  return { id, ...meta, expires: (await done.json()).expires, ...(fileKey ? { ...fileKey, chunk: core.FILE_CHUNK } : {}) }
 }
-
-const uploadFile = (s, path) => upload(s, path, true)
-// A plain channel's files go up as they are.
-const uploadPlain = (s, path) => upload(s, path, false)
 
 // Saves an attachment where the session can Read it, decrypting it when it
 // carries a key; a big one comes down in pieces, several at once, each
@@ -236,7 +233,7 @@ const routes = {
 
   // Encrypts text (and files) for the given devices; the files are uploaded encrypted.
   'POST /seal': async body => {
-    const files = await Promise.all((body.files ?? []).map(path => uploadFile(body.server, path)))
+    const files = await Promise.all((body.files ?? []).map(path => upload(body.server, path, true, body.keep)))
     const envelope = await core.seal({ channelId: body.channelId, sender: device, recipients: [publicDevice(), ...body.recipients], payload: { text: body.text, files } })
     return { envelope }
   },
@@ -258,7 +255,7 @@ const routes = {
   },
 
   // Plain channels: files as they are.
-  'POST /upload': async body => ({ files: await Promise.all((body.files ?? []).map(path => uploadPlain(body.server, path))) }),
+  'POST /upload': async body => ({ files: await Promise.all((body.files ?? []).map(path => upload(body.server, path, false, body.keep))) }),
   'POST /download': async body => ({
     files: await Promise.all(
       (body.files ?? []).map(f => downloadFile(body.server, body.channelId, f).catch(error => ({ name: f.name, type: f.type, error: String(error.message ?? error) }))),

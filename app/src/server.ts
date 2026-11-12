@@ -6,6 +6,7 @@ import { OAuthProvider } from '@cloudflare/workers-oauth-provider'
 import handler from '@tanstack/react-start/server-entry'
 
 import { createApp } from './api/app'
+import { deleteExpiredFiles } from './api/data'
 import { mcpHandler } from './api/mcp'
 
 export { Room } from './room'
@@ -35,5 +36,8 @@ export default {
       providers.set(base, provider)
     }
     return provider.fetch(request, env, ctx)
+  },
+  async scheduled(_controller, env) {
+    await deleteExpiredFiles(env)
   },
 } satisfies ExportedHandler<Env>

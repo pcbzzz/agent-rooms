@@ -11,7 +11,8 @@ export type Decision = { decision: 'approved' | 'denied'; signPub: string; encPu
 export type ChannelDevice = { id: string; kind: 'cli' | 'browser'; label: string; signPub: string; encPub: string; login: string; sessions: string[]; isOnline: boolean }
 // A message's content; attachments carry a key in encrypted channels only.
 // `chunk`: sent in pieces of that size, each encrypted on its own (files over 10 MB).
-export type Payload = { text: string; files?: { id: string; name: string; type: string; size: number; key?: string; iv?: string; chunk?: number }[] }
+// `expires`: when the server deletes the file.
+export type Payload = { text: string; files?: { id: string; name: string; type: string; size: number; key?: string; iv?: string; chunk?: number; expires?: number }[] }
 
 const PASSKEY = 'agent-rooms:passkey'
 const LOCAL_DEVICE = 'agent-rooms:local-device'
@@ -198,21 +199,22 @@ async function send<T>(url: string, init: RequestInit): Promise<T> {
   return (await res.json()) as T
 }
 
-// Uploads a file, encrypted unless `encrypt` is false: whole up to 10 MB
-// (which older plugins read too), in FILE_CHUNK pieces past that.
-async function uploadFile(channelId: string, file: File, encrypt: boolean) {
+// Uploads a file, encrypted unless `encrypt` is false, kept `keep` seconds (a
+// week at most): whole up to 10 MB (which older plugins read too), in
+// FILE_CHUNK pieces past that.
+async function uploadFile(channelId: string, file: File, encrypt: boolean, keep: number) {
   const meta = { name: file.name, type: file.type || 'application/octet-stream', size: file.size }
   if (file.size <= ONE_REQUEST) {
     const bytes = new Uint8Array(await file.arrayBuffer())
     const sealed = encrypt ? await core.encryptFile(bytes) : undefined
-    const { id } = await send<{ id: string }>(`/api/channels/${channelId}/files`, { method: 'POST', body: sealed?.ct ?? bytes })
-    return { id, ...meta, ...(sealed ? { key: sealed.key, iv: sealed.iv } : {}) }
+    const { id, expires } = await send<{ id: string; expires: number }>(`/api/channels/${channelId}/files?keep=${keep}`, { method: 'POST', body: sealed?.ct ?? bytes })
+    return { id, ...meta, expires, ...(sealed ? { key: sealed.key, iv: sealed.iv } : {}) }
   }
   const fileKey = encrypt ? await core.newFileKey() : undefined
   const { id, uploadId } = await send<{ id: string; uploadId: string }>(`/api/channels/${channelId}/uploads`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ size: file.size }),
+    body: JSON.stringify({ size: file.size, keep }),
   })
   const count = core.chunkCount(file.size)
   const parts: { part: number; etag: string }[] = new Array(count)
@@ -221,18 +223,22 @@ async function uploadFile(channelId: string, file: File, encrypt: boolean) {
     const body = fileKey ? await core.encryptChunk(fileKey, i, i === count - 1, piece) : piece
     parts[i] = await send(`/api/channels/${channelId}/uploads/${id}/${i + 1}?uploadId=${encodeURIComponent(uploadId)}`, { method: 'PUT', body })
   }, BROWSER_PARALLEL)
-  await send(`/api/channels/${channelId}/uploads/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uploadId, parts }) })
-  return { id, ...meta, ...(fileKey ? { ...fileKey, chunk: core.FILE_CHUNK } : {}) }
+  const { expires } = await send<{ expires: number }>(`/api/channels/${channelId}/uploads/${id}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uploadId, parts }),
+  })
+  return { id, ...meta, expires, ...(fileKey ? { ...fileKey, chunk: core.FILE_CHUNK } : {}) }
 }
 
 // A plain channel's attachments go up as they are.
-export async function uploadPlain(channelId: string, files: File[]) {
-  return Promise.all(files.map(file => uploadFile(channelId, file, false)))
+export async function uploadPlain(channelId: string, files: File[], keep: number) {
+  return Promise.all(files.map(file => uploadFile(channelId, file, false, keep)))
 }
 
-export async function sealMessage(channelId: string, recipients: ChannelDevice[], text: string, files: File[]) {
+export async function sealMessage(channelId: string, recipients: ChannelDevice[], text: string, files: File[], keep: number) {
   if (!unlocked) throw new Error('Unlock first.')
-  const uploaded = await Promise.all(files.map(file => uploadFile(channelId, file, true)))
+  const uploaded = await Promise.all(files.map(file => uploadFile(channelId, file, true, keep)))
   const envelope = await core.seal({ channelId, sender: unlocked, recipients: [unlocked, ...recipients], payload: { text, files: uploaded } })
   return { envelope, device: unlocked.id }
 }

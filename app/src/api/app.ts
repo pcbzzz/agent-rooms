@@ -104,7 +104,7 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   web.post('/channels/:id/devices', async c => c.json(await data.addChannelDevice(c.env, uid(c), c.req.param('id'), (await c.req.json<{ device: string }>()).device)))
   web.post('/channels/:id/files', async c => {
     const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
-    return c.json(await data.putFile(c.env, channel.id, await c.req.arrayBuffer()))
+    return c.json(await data.putFile(c.env, channel.id, await c.req.arrayBuffer(), c.req.query('keep')))
   })
   web.get('/channels/:id/files/:file', async c => {
     const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
@@ -113,7 +113,8 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   // Files over 10 MB, in parts.
   web.post('/channels/:id/uploads', async c => {
     const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
-    return c.json(await data.startUpload(c.env, uid(c), channel.id, (await c.req.json<{ size: number }>()).size))
+    const body = await c.req.json<{ size: number; keep?: number }>()
+    return c.json(await data.startUpload(c.env, uid(c), channel.id, body.size, body.keep))
   })
   web.put('/channels/:id/uploads/:file/:part', async c => {
     const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
@@ -193,11 +194,12 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
     })
   })
   session.get('/devices', async c => c.json({ devices: await data.channelDevices(c.env, c.get('conn').channel_id) }))
-  session.post('/files', async c => c.json(await data.putFile(c.env, c.get('conn').channel_id, await c.req.arrayBuffer())))
+  session.post('/files', async c => c.json(await data.putFile(c.env, c.get('conn').channel_id, await c.req.arrayBuffer(), c.req.query('keep'))))
   session.get('/files/:file', c => data.getFile(c.env, c.get('conn').user_id, c.get('conn').channel_id, c.req.param('file'), c.req.header('Range')))
   session.post('/uploads', async c => {
     const conn = c.get('conn')
-    return c.json(await data.startUpload(c.env, conn.user_id, conn.channel_id, (await c.req.json<{ size: number }>()).size))
+    const body = await c.req.json<{ size: number; keep?: number }>()
+    return c.json(await data.startUpload(c.env, conn.user_id, conn.channel_id, body.size, body.keep))
   })
   session.put('/uploads/:file/:part', async c => {
     const conn = c.get('conn')
