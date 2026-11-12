@@ -2,11 +2,12 @@
 //
 // - Holds this device's keys and its approved-device list, in files only you
 //   can read (~/.claude/agent-rooms), and does all encryption with them.
-// - Serves that to the plugin over a Unix socket (HTTP + JSON), mode 0600.
+// - Serves that to the plugin over a Unix socket (HTTP + JSON), mode 0600; on
+//   Windows, a named pipe.
 // - Holds a WebSocket per channel and prints one JSON line per event, naming
 //   the channel: {"type":"wake","channel":...}, {"type":"status","state":...}.
 //
-// Usage: node helper.mjs <socket path>
+// Usage: node helper.mjs <name>  (or a socket path); the 'ready' line says where it listens.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
@@ -15,11 +16,14 @@ import { basename, join } from 'node:path'
 
 import * as core from './crypto-core.mjs'
 
-const socketPath = process.argv[2]
-if (!socketPath) {
-  console.error('usage: node helper.mjs <socket path>')
+const WINDOWS = process.platform === 'win32'
+const name = process.argv[2]
+if (!name) {
+  console.error('usage: node helper.mjs <name>')
   process.exit(2)
 }
+// Windows listens on named pipes only. Elsewhere a short path: macOS caps socket paths near 104 bytes.
+const socketPath = /[\\/]/.test(name) ? name : WINDOWS ? `\\\\.\\pipe\\agent-rooms-${name}` : `/tmp/agent-rooms-${name}.sock`
 if (typeof WebSocket !== 'function') {
   console.error('this runtime has no global WebSocket (Node 22+ or Bun needed)')
   process.exit(3)
@@ -232,13 +236,14 @@ const httpServer = createServer(async (req, res) => {
   }
 })
 
-rmSync(socketPath, { force: true })
+// A named pipe goes away with its process; a socket file stays behind.
+if (!WINDOWS) rmSync(socketPath, { force: true })
 httpServer.listen(socketPath, () => {
-  chmodSync(socketPath, 0o600)
-  emit({ type: 'ready', device: publicDevice() })
+  if (!WINDOWS) chmodSync(socketPath, 0o600)
+  emit({ type: 'ready', device: publicDevice(), socket: socketPath })
 })
 const cleanup = () => {
-  rmSync(socketPath, { force: true })
+  if (!WINDOWS) rmSync(socketPath, { force: true })
   dropReviewLock()
   process.exit(0)
 }

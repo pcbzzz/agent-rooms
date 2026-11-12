@@ -71,6 +71,8 @@ let turnTimes: number[] = []
 // The helper: this machine's device, and the socket the plugin reaches it on.
 let device: Device | undefined
 let helperSocket = ''
+// The last thing a helper that stopped said on stderr.
+let helperError = ''
 let helperGeneration = 0
 let helperWaiters: ((d: Device | undefined) => void)[] = []
 let reviewing = false
@@ -183,7 +185,7 @@ export const register: Register = on => {
     const waiting = rooms.reduce((n, r) => n + waitingDevices(r).length, 0)
     return {
       text: [
-        device ? `This device: ${device.label} (${fingerprint(device.id)})` : 'This device: helper not running (needs Node 22+ or Bun)',
+        device ? `This device: ${device.label} (${fingerprint(device.id)})` : `This device: ${helperProblem()}`,
         ...(paused ? ['Delivery PAUSED (/room resume)'] : []),
         ...(waiting ? [`${waiting} device(s) waiting for your approval: /room devices`] : []),
         ...rooms.flatMap(r => [
@@ -310,15 +312,22 @@ export const register: Register = on => {
 
 // Runs the helper for the module's life: it holds the device key and the sockets.
 async function runHelper($: EngineInterface, generation: number) {
-  helperSocket = `/tmp/agent-rooms-${sessionId.replace(/[^a-z0-9]/gi, '').slice(0, 12) || 'local'}.sock`
+  // The helper says where it listens (a named pipe on Windows) in its 'ready' line.
+  const name = sessionId.replace(/[^a-z0-9]/gi, '').slice(0, 12) || 'local'
   const script = `${$.plugin.root}/helper/helper.mjs`
   for (const runtime of ['node', 'bun']) {
     let buffer = ''
     let started = false
     try {
-      for await (const chunk of $.process.spawn({ argv: [runtime, script, helperSocket] })) {
+      for await (const chunk of $.process.spawn({ argv: [runtime, script, name] })) {
         if (generation !== helperGeneration) return
-        if (chunk.stream !== 'stdout') continue
+        if (chunk.stream !== 'stdout') {
+          const said = chunk.text.trim().split('\n').filter(l => /error|needed/i.test(l)).at(-1)
+          if (said) helperError = said.trim().slice(0, 300)
+          // It ran, so this runtime exists: don't blame a missing Node.
+          started = true
+          continue
+        }
         started = true
         buffer += chunk.text
         const lines = buffer.split('\n')
@@ -344,13 +353,15 @@ async function runHelper($: EngineInterface, generation: number) {
 }
 
 async function onHelperEvent($: EngineInterface, line: string) {
-  let event: { type?: string; state?: string; online?: string[]; device?: Device; channel?: string }
+  let event: { type?: string; state?: string; online?: string[]; device?: Device; channel?: string; socket?: string }
   try {
     event = JSON.parse(line)
   } catch {
     return
   }
   if (event.type === 'ready' && event.device) {
+    helperSocket = event.socket ?? helperSocket
+    helperError = ''
     device = event.device
     for (const w of helperWaiters.splice(0)) w(device)
     await Promise.all(rooms.map(r => openSocket($, r)))
@@ -387,6 +398,9 @@ async function onHelperEvent($: EngineInterface, line: string) {
   showStatus($)
 }
 
+const helperProblem = () =>
+  helperError ? `the agent-rooms helper stopped: ${helperError}` : "the agent-rooms helper isn't running; it needs Node 22+ (or Bun) on your PATH"
+
 function helperDevice($: EngineInterface): Promise<Device | undefined> {
   if (device) return Promise.resolve(device)
   return new Promise(resolve => {
@@ -420,7 +434,7 @@ const newRoom = (config: Config): Room => ({ config, members: [], people: [], de
 
 async function claim($: EngineInterface, url: string): Promise<{ ok: true; room: Room } | { ok: false; error: string }> {
   const me = await helperDevice($)
-  if (!me) return { ok: false, error: "the agent-rooms helper isn't running; it needs Node 22+ (or Bun) on your PATH" }
+  if (!me) return { ok: false, error: helperProblem() }
   try {
     const res = await $.http.fetch(url, {
       method: 'POST',
@@ -519,7 +533,7 @@ function registerDevice($: EngineInterface, r: Room): Promise<boolean> {
     const me = await helperDevice($)
     if (!rooms.includes(r)) return false
     if (!me) {
-      $.ui.toast(`agent-rooms: "${r.config.channel}" is end-to-end encrypted, and this machine can't hold a device key (the helper needs Node 22+ or Bun). Disconnected.`)
+      $.ui.toast(`agent-rooms: "${r.config.channel}" is end-to-end encrypted, and this machine can't hold a device key (${helperProblem()}). Disconnected.`)
       await disconnect($, r)
       return false
     }
@@ -669,7 +683,7 @@ async function send($: EngineInterface, target: string, text: string, files: str
   const r = routed.room
   const c = r.config
   if (!device && (c.encrypted || files.length > 0))
-    return { ok: false, error: "The agent-rooms helper isn't running; it needs Node 22+ (or Bun) on your PATH." }
+    return { ok: false, error: `${helperProblem()}.` }
   const to = routed.to === '*' ? null : routed.to
   await Promise.all([refreshMembers($, r), refreshDevices($, r)])
   if (to !== null && !r.members.some(m => m.name === to) && !r.people.includes(to))
