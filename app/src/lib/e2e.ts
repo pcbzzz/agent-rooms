@@ -10,7 +10,8 @@ export type BrowserDevice = core.Device & { kind: 'passkey' | 'local'; stateKey?
 export type Decision = { decision: 'approved' | 'denied'; signPub: string; encPub: string; login: string; label: string; at: number }
 export type ChannelDevice = { id: string; kind: 'cli' | 'browser'; label: string; signPub: string; encPub: string; login: string; sessions: string[]; isOnline: boolean }
 // A message's content; attachments carry a key in encrypted channels only.
-export type Payload = { text: string; files?: { id: string; name: string; type: string; size: number; key?: string; iv?: string }[] }
+// `chunk`: sent in pieces of that size, each encrypted on its own (files over 10 MB).
+export type Payload = { text: string; files?: { id: string; name: string; type: string; size: number; key?: string; iv?: string; chunk?: number }[] }
 
 const PASSKEY = 'agent-rooms:passkey'
 const LOCAL_DEVICE = 'agent-rooms:local-device'
@@ -186,43 +187,85 @@ export async function openMessage(channelId: string, text: string): Promise<Open
   }
 }
 
+// Up to this, a file goes up in one request; bigger ones (which the server allows some accounts only) in parts.
+export const ONE_REQUEST = 10 * 1024 * 1024
+// A phone can't hold 32 pieces of 16 MB in memory at once.
+const BROWSER_PARALLEL = { max: 16 }
+
+async function send<T>(url: string, init: RequestInit): Promise<T> {
+  const res = await fetch(url, { credentials: 'same-origin', ...init })
+  if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? 'Upload failed.')
+  return (await res.json()) as T
+}
+
+// Uploads a file, encrypted unless `encrypt` is false: whole up to 10 MB
+// (which older plugins read too), in FILE_CHUNK pieces past that.
+async function uploadFile(channelId: string, file: File, encrypt: boolean) {
+  const meta = { name: file.name, type: file.type || 'application/octet-stream', size: file.size }
+  if (file.size <= ONE_REQUEST) {
+    const bytes = new Uint8Array(await file.arrayBuffer())
+    const sealed = encrypt ? await core.encryptFile(bytes) : undefined
+    const { id } = await send<{ id: string }>(`/api/channels/${channelId}/files`, { method: 'POST', body: sealed?.ct ?? bytes })
+    return { id, ...meta, ...(sealed ? { key: sealed.key, iv: sealed.iv } : {}) }
+  }
+  const fileKey = encrypt ? await core.newFileKey() : undefined
+  const { id, uploadId } = await send<{ id: string; uploadId: string }>(`/api/channels/${channelId}/uploads`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ size: file.size }),
+  })
+  const count = core.chunkCount(file.size)
+  const parts: { part: number; etag: string }[] = new Array(count)
+  await core.inParallel(count, async i => {
+    const piece = new Uint8Array(await file.slice(i * core.FILE_CHUNK, (i + 1) * core.FILE_CHUNK).arrayBuffer())
+    const body = fileKey ? await core.encryptChunk(fileKey, i, i === count - 1, piece) : piece
+    parts[i] = await send(`/api/channels/${channelId}/uploads/${id}/${i + 1}?uploadId=${encodeURIComponent(uploadId)}`, { method: 'PUT', body })
+  }, BROWSER_PARALLEL)
+  await send(`/api/channels/${channelId}/uploads/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ uploadId, parts }) })
+  return { id, ...meta, ...(fileKey ? { ...fileKey, chunk: core.FILE_CHUNK } : {}) }
+}
+
 // A plain channel's attachments go up as they are.
 export async function uploadPlain(channelId: string, files: File[]) {
-  return Promise.all(
-    files.map(async file => {
-      const res = await fetch(`/api/channels/${channelId}/files`, { method: 'POST', body: await file.arrayBuffer(), credentials: 'same-origin' })
-      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? 'Upload failed.')
-      const { id } = (await res.json()) as { id: string }
-      return { id, name: file.name, type: file.type || 'application/octet-stream', size: file.size }
-    }),
-  )
+  return Promise.all(files.map(file => uploadFile(channelId, file, false)))
 }
 
 export async function sealMessage(channelId: string, recipients: ChannelDevice[], text: string, files: File[]) {
   if (!unlocked) throw new Error('Unlock first.')
-  const uploaded = await Promise.all(
-    files.map(async file => {
-      const sealed = await core.encryptFile(new Uint8Array(await file.arrayBuffer()))
-      const res = await fetch(`/api/channels/${channelId}/files`, { method: 'POST', body: sealed.ct, credentials: 'same-origin' })
-      if (!res.ok) throw new Error(((await res.json().catch(() => ({}))) as { error?: string }).error ?? 'Upload failed.')
-      const { id } = (await res.json()) as { id: string }
-      return { id, name: file.name, type: file.type || 'application/octet-stream', size: file.size, key: sealed.key, iv: sealed.iv }
-    }),
-  )
+  const uploaded = await Promise.all(files.map(file => uploadFile(channelId, file, true)))
   const envelope = await core.seal({ channelId, sender: unlocked, recipients: [unlocked, ...recipients], payload: { text, files: uploaded } })
   return { envelope, device: unlocked.id }
 }
 
 const fileCache = new Map<string, Promise<string>>()
 
+// Fetches an attachment and decrypts it; one over 10 MB comes down in pieces, several at once.
+async function fetchFile(channelId: string, file: NonNullable<Payload['files']>[number]): Promise<core.Bytes[]> {
+  const url = `/api/channels/${channelId}/files/${file.id}`
+  const fileKey = file.key && file.iv ? { key: file.key, iv: file.iv } : undefined
+  if (!file.chunk && (fileKey || file.size <= ONE_REQUEST)) {
+    const res = await fetch(url, { credentials: 'same-origin' })
+    if (!res.ok) throw new Error('missing')
+    const raw = new Uint8Array(await res.arrayBuffer())
+    return [fileKey ? await core.decryptFile(raw, fileKey) : raw]
+  }
+  const count = core.chunkCount(file.size)
+  const parts: core.Bytes[] = new Array(count)
+  await core.inParallel(count, async i => {
+    const { offset, length } = core.storedRange(file.size, i, !!fileKey)
+    const res = await fetch(url, { credentials: 'same-origin', headers: { Range: `bytes=${offset}-${offset + length - 1}` } })
+    const piece = new Uint8Array(await res.arrayBuffer())
+    if (res.status !== 206 || piece.length !== length) throw new Error('incomplete')
+    parts[i] = fileKey ? await core.decryptChunk(fileKey, i, i === count - 1, piece) : piece
+  }, BROWSER_PARALLEL)
+  return parts
+}
+
 // A decrypted attachment as an object URL, fetched once.
 export function fileUrl(channelId: string, file: NonNullable<Payload['files']>[number]) {
   let url = fileCache.get(file.id)
   if (!url) {
-    url = fetch(`/api/channels/${channelId}/files/${file.id}`, { credentials: 'same-origin' })
-      .then(r => (r.ok ? r.arrayBuffer() : Promise.reject(new Error('missing'))))
-      .then(raw => (file.key && file.iv ? core.decryptFile(new Uint8Array(raw), { key: file.key, iv: file.iv }) : new Uint8Array(raw)))
-      .then(bytes => URL.createObjectURL(new Blob([bytes], { type: file.type })))
+    url = fetchFile(channelId, file).then(parts => URL.createObjectURL(new Blob(parts, { type: file.type })))
     fileCache.set(file.id, url)
   }
   return url

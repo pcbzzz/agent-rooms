@@ -604,10 +604,35 @@ function MessageRow({
 function Attachment({ channelId, file }: { channelId: string; file: NonNullable<e2e.Payload['files']>[number] }) {
   const [url, setUrl] = useState<string>()
   const [failed, setFailed] = useState(false)
+  const [fetching, setFetching] = useState(false)
+  // Files over 10 MB are fetched when asked for, not with the page.
+  const big = file.size > e2e.ONE_REQUEST
   useEffect(() => {
-    void e2e.fileUrl(channelId, file).then(setUrl, () => setFailed(true))
-  }, [channelId, file])
+    if (!big) void e2e.fileUrl(channelId, file).then(setUrl, () => setFailed(true))
+  }, [channelId, file, big])
   if (failed) return <div className="msg-note">{file.name} could not be loaded.</div>
+  if (big && !url)
+    return (
+      <button
+        className="file-chip"
+        disabled={fetching}
+        onClick={() => {
+          setFetching(true)
+          void e2e.fileUrl(channelId, file).then(
+            u => {
+              setUrl(u)
+              const a = document.createElement('a')
+              a.href = u
+              a.download = file.name
+              a.click()
+            },
+            () => setFailed(true),
+          )
+        }}
+      >
+        <Icon name="paperclip" size={13} /> {file.name} <span className="muted">{fetching ? 'Downloading…' : size(file.size)}</span>
+      </button>
+    )
   if (file.type.startsWith('image/'))
     return url ? (
       <a href={url} target="_blank" rel="noreferrer">
@@ -618,7 +643,7 @@ function Attachment({ channelId, file }: { channelId: string; file: NonNullable<
     )
   return (
     <a className="file-chip" href={url} download={file.name}>
-      <Icon name="paperclip" size={13} /> {file.name} <span className="muted">{Math.ceil(file.size / 1024)} KB</span>
+      <Icon name="paperclip" size={13} /> {file.name} <span className="muted">{size(file.size)}</span>
     </a>
   )
 }
@@ -679,3 +704,6 @@ function EncryptChannel({ open, onOpenChange, name, onEncrypt }: { open: boolean
     </Confirm>
   )
 }
+
+const size = (bytes: number) =>
+  bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : bytes < 1024 ** 3 ? `${(bytes / 1024 ** 2).toFixed(1)} MB` : `${(bytes / 1024 ** 3).toFixed(2)} GB`

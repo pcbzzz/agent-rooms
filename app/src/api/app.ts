@@ -108,7 +108,21 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   })
   web.get('/channels/:id/files/:file', async c => {
     const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
-    return data.getFile(c.env, channel.id, c.req.param('file'))
+    return data.getFile(c.env, uid(c), channel.id, c.req.param('file'), c.req.header('Range'))
+  })
+  // Files over 10 MB, in parts.
+  web.post('/channels/:id/uploads', async c => {
+    const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
+    return c.json(await data.startUpload(c.env, uid(c), channel.id, (await c.req.json<{ size: number }>()).size))
+  })
+  web.put('/channels/:id/uploads/:file/:part', async c => {
+    const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
+    return c.json(await data.uploadPart(c.env, uid(c), channel.id, c.req.param('file'), c.req.query('uploadId') ?? '', Number(c.req.param('part')), await c.req.arrayBuffer()))
+  })
+  web.post('/channels/:id/uploads/:file', async c => {
+    const channel = await data.channelFor(c.env, uid(c), c.req.param('id'))
+    const body = await c.req.json<{ uploadId: string; parts: { part: number; etag: string }[] }>()
+    return c.json(await data.completeUpload(c.env, uid(c), channel.id, c.req.param('file'), body.uploadId, body.parts))
   })
   web.post('/devices', async c => c.json(await data.registerDevice(c.env, uid(c), { ...(await c.req.json<data.DeviceKeys>()), kind: 'browser' })))
   web.get('/devices/:id/state', async c => c.json(await data.deviceState(c.env, uid(c), c.req.param('id'))))
@@ -180,7 +194,20 @@ export function createApp(startHandler: (request: Request) => Promise<Response>)
   })
   session.get('/devices', async c => c.json({ devices: await data.channelDevices(c.env, c.get('conn').channel_id) }))
   session.post('/files', async c => c.json(await data.putFile(c.env, c.get('conn').channel_id, await c.req.arrayBuffer())))
-  session.get('/files/:file', c => data.getFile(c.env, c.get('conn').channel_id, c.req.param('file')))
+  session.get('/files/:file', c => data.getFile(c.env, c.get('conn').user_id, c.get('conn').channel_id, c.req.param('file'), c.req.header('Range')))
+  session.post('/uploads', async c => {
+    const conn = c.get('conn')
+    return c.json(await data.startUpload(c.env, conn.user_id, conn.channel_id, (await c.req.json<{ size: number }>()).size))
+  })
+  session.put('/uploads/:file/:part', async c => {
+    const conn = c.get('conn')
+    return c.json(await data.uploadPart(c.env, conn.user_id, conn.channel_id, c.req.param('file'), c.req.query('uploadId') ?? '', Number(c.req.param('part')), await c.req.arrayBuffer()))
+  })
+  session.post('/uploads/:file', async c => {
+    const conn = c.get('conn')
+    const body = await c.req.json<{ uploadId: string; parts: { part: number; etag: string }[] }>()
+    return c.json(await data.completeUpload(c.env, conn.user_id, conn.channel_id, c.req.param('file'), body.uploadId, body.parts))
+  })
   session.post('/ack', forward('/ack'))
   // The session leaves on its own: its connection is deleted and its name freed.
   session.post('/leave', async c => {

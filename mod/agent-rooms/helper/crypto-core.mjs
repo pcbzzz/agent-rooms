@@ -155,6 +155,102 @@ export async function decryptFile(ct, { key, iv }) {
   return new Uint8Array(await subtle.decrypt({ name: 'AES-GCM', iv: unb64(iv) }, k, ct))
 }
 
+// Files over 10 MB go in pieces of FILE_CHUNK bytes, each encrypted on its
+// own under the file's key. A piece's nonce and associated data carry its
+// index and whether it is the last, so pieces can't be reordered, swapped
+// or cut off without failing to decrypt.
+export const FILE_CHUNK = 8 * 1024 * 1024
+
+export async function newFileKey() {
+  const key = await subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt'])
+  return { key: b64(await subtle.exportKey('raw', key)), iv: b64(crypto.getRandomValues(new Uint8Array(12))) }
+}
+
+function chunkParams(iv, index, last) {
+  const nonce = unb64(iv)
+  const view = new DataView(nonce.buffer)
+  view.setUint32(8, view.getUint32(8) ^ index)
+  const aad = new Uint8Array(5)
+  new DataView(aad.buffer).setUint32(0, index)
+  aad[4] = last ? 1 : 0
+  return { name: 'AES-GCM', iv: nonce, additionalData: aad }
+}
+
+export async function encryptChunk({ key, iv }, index, last, bytes) {
+  const k = await subtle.importKey('raw', unb64(key), 'AES-GCM', false, ['encrypt'])
+  return new Uint8Array(await subtle.encrypt(chunkParams(iv, index, last), k, bytes))
+}
+
+export async function decryptChunk({ key, iv }, index, last, ct) {
+  const k = await subtle.importKey('raw', unb64(key), 'AES-GCM', false, ['decrypt'])
+  return new Uint8Array(await subtle.decrypt(chunkParams(iv, index, last), k, ct))
+}
+
+// How many pieces a file of `size` bytes has, and each one's length when encrypted (16 bytes of tag each).
+export const chunkCount = size => Math.max(1, Math.ceil(size / FILE_CHUNK))
+export const sealedChunkLength = (size, index) => Math.min(FILE_CHUNK, size - index * FILE_CHUNK) + 16
+// Where piece `index` sits in the stored file, encrypted or not.
+export const storedRange = (size, index, sealed) =>
+  sealed ? { offset: index * (FILE_CHUNK + 16), length: sealedChunkLength(size, index) } : { offset: index * FILE_CHUNK, length: Math.min(FILE_CHUNK, size - index * FILE_CHUNK) }
+
+// Runs fn(0..count-1) for a file's pieces, as many at once as the network
+// keeps up with: it starts at 8 and allows a quarter more each round that
+// finishes pieces faster than any round before, up to `max` (each piece in
+// flight holds up to 16 MB). A piece that fails is retried up to 3 times, halving how many
+// run at once; a fourth failure fails the whole.
+export function inParallel(count, fn, { start = 8, max = 32, retries = 3 } = {}) {
+  return new Promise((resolve, reject) => {
+    let limit = Math.min(start, max)
+    let next = 0
+    let running = 0
+    let done = 0
+    let failed = false
+    let best = 0
+    let round = { at: Date.now(), done: 0 }
+    const tries = new Map()
+    const queue = []
+    const finished = () => {
+      done++
+      round.done++
+      // Pieces are the same size, so pieces per millisecond is the speed.
+      if (round.done >= limit) {
+        const speed = round.done / Math.max(1, Date.now() - round.at)
+        if (speed > best * 1.05) limit = Math.min(max, limit + Math.max(1, Math.floor(limit / 4)))
+        best = Math.max(best, speed)
+        round = { at: Date.now(), done: 0 }
+      }
+    }
+    const launch = () => {
+      while (!failed && running < limit && (queue.length || next < count)) {
+        const i = queue.length ? queue.shift() : next++
+        running++
+        fn(i).then(
+          () => {
+            running--
+            finished()
+            if (done === count) resolve()
+            else launch()
+          },
+          error => {
+            running--
+            const tried = (tries.get(i) ?? 0) + 1
+            tries.set(i, tried)
+            if (tried > retries) {
+              failed = true
+              return reject(error)
+            }
+            limit = Math.max(1, Math.floor(limit / 2))
+            queue.push(i)
+            setTimeout(launch, 500 * tried)
+          },
+        )
+      }
+    }
+    if (count === 0) resolve()
+    else launch()
+  })
+}
+
 // --- trust lists ---------------------------------------------------------------
 
 // A device's decisions about other devices, encrypted under a key only it

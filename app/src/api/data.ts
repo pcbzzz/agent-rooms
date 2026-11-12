@@ -412,7 +412,12 @@ export async function deviceState(env: Env, userId: string, id: string, blob?: s
 // --- files ------------------------------------------------------------------------
 // Stored encrypted: the key travels inside the message, never here.
 
+// Anyone can send files up to 10 MB in one request. Bigger ones, up to 2 GB,
+// go up in parts (an R2 multipart upload), and only users with big_files set
+// may send or fetch them.
 const MAX_FILE = 10 * 1024 * 1024 + 64
+const MAX_BIG_FILE = 2 * 1024 * 1024 * 1024 + 64 * 1024
+const MAX_PART = 16 * 1024 * 1024
 
 export async function putFile(env: Env, channelId: string, body: ArrayBuffer) {
   if (body.byteLength === 0 || body.byteLength > MAX_FILE) throw new UserError(400, 'Files are up to 10 MB.')
@@ -421,11 +426,59 @@ export async function putFile(env: Env, channelId: string, body: ArrayBuffer) {
   return { id }
 }
 
-export async function getFile(env: Env, channelId: string, id: string) {
+async function checkBigFiles(env: Env, userId: string) {
+  const user = await env.DB.prepare(`SELECT big_files FROM users WHERE id = ?`).bind(userId).first<{ big_files: number }>()
+  if (!user?.big_files) throw new UserError(403, 'Files over 10 MB are limited to some accounts on this server.')
+}
+
+export async function startUpload(env: Env, userId: string, channelId: string, size: number) {
+  await checkBigFiles(env, userId)
+  if (!Number.isFinite(size) || size <= 0 || size > MAX_BIG_FILE) throw new UserError(400, 'Files are up to 2 GB.')
+  const id = randomId(18)
+  const upload = await env.FILES.createMultipartUpload(`${channelId}/${id}`)
+  return { id, uploadId: upload.uploadId }
+}
+
+export async function uploadPart(env: Env, userId: string, channelId: string, id: string, uploadId: string, part: number, body: ArrayBuffer) {
+  await checkBigFiles(env, userId)
+  if (!/^[\w-]{1,64}$/.test(id) || !Number.isInteger(part) || part < 1 || part > 10_000) throw new UserError(400, 'Bad upload.')
+  if (body.byteLength === 0 || body.byteLength > MAX_PART) throw new UserError(400, 'Parts are up to 16 MB.')
+  const uploaded = await env.FILES.resumeMultipartUpload(`${channelId}/${id}`, uploadId).uploadPart(part, body)
+  return { part: uploaded.partNumber, etag: uploaded.etag }
+}
+
+export async function completeUpload(env: Env, userId: string, channelId: string, id: string, uploadId: string, parts: { part: number; etag: string }[]) {
+  await checkBigFiles(env, userId)
+  if (!/^[\w-]{1,64}$/.test(id) || !Array.isArray(parts) || parts.length === 0) throw new UserError(400, 'Bad upload.')
+  const upload = env.FILES.resumeMultipartUpload(`${channelId}/${id}`, uploadId)
+  const object = await upload.complete(parts.map(p => ({ partNumber: p.part, etag: p.etag })))
+  if (object.size > MAX_BIG_FILE) {
+    await env.FILES.delete(`${channelId}/${id}`)
+    throw new UserError(400, 'Files are up to 2 GB.')
+  }
+  return { id }
+}
+
+// `range`: a request's Range header; one `bytes=a-b` range is served, so big files download in parallel pieces.
+export async function getFile(env: Env, userId: string, channelId: string, id: string, range?: string) {
   if (!/^[\w-]{1,64}$/.test(id)) throw new UserError(400, 'Bad file id.')
-  const object = await env.FILES.get(`${channelId}/${id}`)
+  const key = `${channelId}/${id}`
+  const head = await env.FILES.head(key)
+  if (!head) throw new UserError(404, 'No such file.')
+  if (head.size > MAX_FILE) await checkBigFiles(env, userId)
+  const headers = { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'private, max-age=86400', 'Accept-Ranges': 'bytes' }
+  const wanted = range?.match(/^bytes=(\d+)-(\d*)$/)
+  if (wanted) {
+    const offset = Number(wanted[1])
+    const end = Math.min(wanted[2] ? Number(wanted[2]) : head.size - 1, head.size - 1)
+    if (offset > end) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${head.size}` } })
+    const part = await env.FILES.get(key, { range: { offset, length: end - offset + 1 } })
+    if (!part) throw new UserError(404, 'No such file.')
+    return new Response(part.body, { status: 206, headers: { ...headers, 'Content-Length': String(end - offset + 1), 'Content-Range': `bytes ${offset}-${end}/${head.size}` } })
+  }
+  const object = await env.FILES.get(key)
   if (!object) throw new UserError(404, 'No such file.')
-  return new Response(object.body, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'private, max-age=86400' } })
+  return new Response(object.body, { headers: { ...headers, 'Content-Length': String(object.size) } })
 }
 
 // Who a message in the channel may be addressed to: a connected session, or

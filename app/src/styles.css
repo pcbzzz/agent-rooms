@@ -220,6 +220,8 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .msg-image.placeholder { width: 240px; height: 160px; }
 .file-chip { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 9px; font-size: 13px; background: var(--bg-tint); }
 .file-chip:hover { border-color: var(--line-strong); }
+button.file-chip { height: auto; font-weight: 400; border-radius: 9px; padding: 6px 10px; }
+button.file-chip:disabled { opacity: 0.7; }
 
 /* Base UI parts */
 .backdrop { position: fixed; inset: 0; min-height: 100dvh; background: rgb(15 12 10 / 0.42); backdrop-filter: blur(2px); transition: opacity 160ms; z-index: 40; }

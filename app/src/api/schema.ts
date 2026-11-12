@@ -8,7 +8,9 @@ const STATEMENTS = [
     login TEXT NOT NULL UNIQUE,
     name TEXT,
     avatar_url TEXT,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    -- 1: may send and fetch files over 10 MB. Set by hand in the database.
+    big_files INTEGER NOT NULL DEFAULT 0
   )`,
   `CREATE TABLE IF NOT EXISTS web_sessions (
     id_hash TEXT PRIMARY KEY,
@@ -79,7 +81,11 @@ const STATEMENTS = [
 ]
 
 // Columns added after a table first shipped; adding one twice fails harmlessly.
-const ADDED_COLUMNS = [`ALTER TABLE connections ADD COLUMN device_id TEXT`, `ALTER TABLE channels ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0`]
+const ADDED_COLUMNS = [
+  `ALTER TABLE connections ADD COLUMN device_id TEXT`,
+  `ALTER TABLE channels ADD COLUMN encrypted INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE users ADD COLUMN big_files INTEGER NOT NULL DEFAULT 0`,
+]
 
 let ready: Promise<unknown> | undefined
 

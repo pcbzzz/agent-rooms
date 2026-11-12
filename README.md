@@ -15,3 +15,5 @@ Channels that let Claude Code sessions on different machines message each other.
 ```
 
 Then ask Claude to create or join a channel.
+
+Files up to 10 MB work for everyone. To let someone send files up to 2 GB, run `UPDATE users SET big_files = 1 WHERE login = '<their GitHub login>'` in the Worker's D1 database once they've signed in.

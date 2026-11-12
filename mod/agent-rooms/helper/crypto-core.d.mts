@@ -14,5 +14,14 @@ export function seal(args: { channelId: string; sender: Device; recipients: Publ
 export function open<T = unknown>(args: { channelId: string; envelope: Envelope; me: Device; senderSignPub: string }): Promise<T>
 export function encryptFile(bytes: Uint8Array): Promise<SealedFile>
 export function decryptFile(ct: Uint8Array, file: { key: string; iv: string }): Promise<Bytes>
+export const FILE_CHUNK: number
+export type FileKey = { key: string; iv: string }
+export function newFileKey(): Promise<FileKey>
+export function encryptChunk(file: FileKey, index: number, last: boolean, bytes: Uint8Array): Promise<Bytes>
+export function decryptChunk(file: FileKey, index: number, last: boolean, ct: Uint8Array): Promise<Bytes>
+export function chunkCount(size: number): number
+export function sealedChunkLength(size: number, index: number): number
+export function storedRange(size: number, index: number, sealed: boolean): { offset: number; length: number }
+export function inParallel(count: number, fn: (index: number) => Promise<void>, options?: { start?: number; max?: number; retries?: number }): Promise<void>
 export function encryptState(state: unknown, secret: Uint8Array): Promise<string>
 export function decryptState<T = unknown>(blob: string, secret: Uint8Array): Promise<T>

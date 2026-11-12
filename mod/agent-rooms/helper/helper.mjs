@@ -10,7 +10,7 @@
 //
 // Usage: node helper.mjs <name>  (or a socket path); the 'ready' line says where it listens.
 
-import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import { homedir, hostname, tmpdir } from 'node:os'
@@ -38,7 +38,9 @@ const TRUST_FILE = join(HOME, 'trust.json')
 const REVIEW_LOCK = join(HOME, 'review.lock')
 const LOCK_STALE_MS = 10 * 60 * 1000
 const FILES_DIR = join(tmpdir(), 'agent-rooms')
-const MAX_FILE = 10 * 1024 * 1024
+// Up to this, a file goes up in one request; bigger ones (which the server allows some accounts only) in parts.
+const ONE_REQUEST = 10 * 1024 * 1024
+const MAX_FILE = 2 * 1024 * 1024 * 1024
 mkdirSync(HOME, { recursive: true, mode: 0o700 })
 
 const emit = event => process.stdout.write(JSON.stringify(event) + '\n')
@@ -136,30 +138,77 @@ async function server(s, path, init = {}) {
   return res
 }
 
-async function uploadFile(s, path) {
-  const bytes = readFileSync(path)
-  if (bytes.length > MAX_FILE) throw new Error(`${basename(path)} is over 10 MB`)
-  const sealed = await core.encryptFile(bytes)
-  const { id } = await (await server(s, 'files', { method: 'POST', body: sealed.ct, headers: { 'Content-Type': 'application/octet-stream' } })).json()
-  return { id, name: basename(path), type: mimeOf(path), size: bytes.length, key: sealed.key, iv: sealed.iv }
+const octets = { 'Content-Type': 'application/octet-stream' }
+
+// Uploads a file, encrypted unless `encrypt` is false. Up to 10 MB it goes in
+// one request (encrypted whole, which older plugins read too); bigger, in
+// FILE_CHUNK pieces, each encrypted on its own.
+async function upload(s, path, encrypt) {
+  const size = statSync(path).size
+  if (size > MAX_FILE) throw new Error(`${basename(path)} is over 2 GB`)
+  const meta = { name: basename(path), type: mimeOf(path), size }
+  if (size <= ONE_REQUEST) {
+    const bytes = readFileSync(path)
+    if (!encrypt) return { id: (await (await server(s, 'files', { method: 'POST', body: bytes, headers: octets })).json()).id, ...meta }
+    const sealed = await core.encryptFile(bytes)
+    const { id } = await (await server(s, 'files', { method: 'POST', body: sealed.ct, headers: octets })).json()
+    return { id, ...meta, key: sealed.key, iv: sealed.iv }
+  }
+  const fileKey = encrypt ? await core.newFileKey() : undefined
+  const { id, uploadId } = await (await server(s, 'uploads', { method: 'POST', body: JSON.stringify({ size }), headers: { 'Content-Type': 'application/json' } })).json()
+  const fd = openSync(path, 'r')
+  const count = core.chunkCount(size)
+  const parts = new Array(count)
+  try {
+    await core.inParallel(count, async i => {
+      const piece = Buffer.alloc(Math.min(core.FILE_CHUNK, size - i * core.FILE_CHUNK))
+      readSync(fd, piece, 0, piece.length, i * core.FILE_CHUNK)
+      const body = fileKey ? await core.encryptChunk(fileKey, i, i === count - 1, piece) : piece
+      const res = await server(s, `uploads/${id}/${i + 1}?uploadId=${encodeURIComponent(uploadId)}`, { method: 'PUT', body, headers: octets })
+      parts[i] = await res.json()
+    })
+  } finally {
+    closeSync(fd)
+  }
+  await server(s, `uploads/${id}`, { method: 'POST', body: JSON.stringify({ uploadId, parts }), headers: { 'Content-Type': 'application/json' } })
+  return { id, ...meta, ...(fileKey ? { ...fileKey, chunk: core.FILE_CHUNK } : {}) }
 }
 
+const uploadFile = (s, path) => upload(s, path, true)
 // A plain channel's files go up as they are.
-async function uploadPlain(s, path) {
-  const bytes = readFileSync(path)
-  if (bytes.length > MAX_FILE) throw new Error(`${basename(path)} is over 10 MB`)
-  const { id } = await (await server(s, 'files', { method: 'POST', body: bytes, headers: { 'Content-Type': 'application/octet-stream' } })).json()
-  return { id, name: basename(path), type: mimeOf(path), size: bytes.length }
-}
+const uploadPlain = (s, path) => upload(s, path, false)
 
-// Saves an attachment where the session can Read it; decrypts it when it carries a key.
+// Saves an attachment where the session can Read it, decrypting it when it
+// carries a key; a big one comes down in pieces, several at once, each
+// written into place.
 async function downloadFile(s, channelId, file) {
-  const raw = new Uint8Array(await (await server(s, `files/${encodeURIComponent(file.id)}`)).arrayBuffer())
-  const bytes = file.key ? await core.decryptFile(raw, file) : raw
   const dir = join(FILES_DIR, channelId.replace(/[^\w-]/g, ''))
   mkdirSync(dir, { recursive: true, mode: 0o700 })
   const path = join(dir, `${file.id.slice(0, 8)}-${file.name.replace(/[^\w.-]+/g, '_').slice(-80)}`)
-  writeFileSync(path, bytes, { mode: 0o600 })
+  const url = `files/${encodeURIComponent(file.id)}`
+  if (!file.chunk && (file.key || (file.size ?? 0) <= ONE_REQUEST)) {
+    const raw = new Uint8Array(await (await server(s, url)).arrayBuffer())
+    writeFileSync(path, file.key ? await core.decryptFile(raw, file) : raw, { mode: 0o600 })
+    return { name: file.name, type: file.type, path }
+  }
+  const fd = openSync(path, 'w', 0o600)
+  try {
+    const count = core.chunkCount(file.size)
+    const sealed = !!file.chunk
+    await core.inParallel(count, async i => {
+      const { offset, length } = core.storedRange(file.size, i, sealed)
+      const res = await server(s, url, { headers: { Range: `bytes=${offset}-${offset + length - 1}` } })
+      const piece = new Uint8Array(await res.arrayBuffer())
+      if (res.status !== 206 || piece.length !== length) throw new Error('the file arrived incomplete')
+      const plain = sealed ? await core.decryptChunk(file, i, i === count - 1, piece) : piece
+      writeSync(fd, plain, 0, plain.length, i * core.FILE_CHUNK)
+    })
+  } catch (error) {
+    closeSync(fd)
+    rmSync(path, { force: true })
+    throw error
+  }
+  closeSync(fd)
   return { name: file.name, type: file.type, path }
 }
 
