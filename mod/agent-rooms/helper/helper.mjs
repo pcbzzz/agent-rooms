@@ -3,13 +3,15 @@
 // - Holds this device's keys and its approved-device list, in files only you
 //   can read (~/.claude/agent-rooms), and does all encryption with them.
 // - Serves that to the plugin over a Unix socket (HTTP + JSON), mode 0600; on
-//   Windows, a named pipe.
+//   Windows, a named pipe and a localhost port that wants a key only the
+//   plugin is given.
 // - Holds a WebSocket per channel and prints one JSON line per event, naming
 //   the channel: {"type":"wake","channel":...}, {"type":"status","state":...}.
 //
 // Usage: node helper.mjs <name>  (or a socket path); the 'ready' line says where it listens.
 
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { randomBytes, timingSafeEqual } from 'node:crypto'
 import { createServer } from 'node:http'
 import { homedir, hostname, tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -219,13 +221,22 @@ const routes = {
   'POST /disconnect': async body => (body.channel ? closeSocket(body.channel) : [...sockets.keys()].forEach(closeSocket), { ok: true }),
 }
 
-const httpServer = createServer(async (req, res) => {
+// The localhost port's key: anything else on this machine can reach the port, but not without it.
+const portKey = WINDOWS ? randomBytes(32).toString('hex') : undefined
+const keyed = req => {
+  const given = Buffer.from(String(req.headers['x-helper-key'] ?? ''))
+  const want = Buffer.from(portKey)
+  return given.length === want.length && timingSafeEqual(given, want)
+}
+
+const handle = needsKey => async (req, res) => {
   const url = new URL(req.url, 'http://helper')
   const route = routes[`${req.method} ${url.pathname}`]
   const reply = (status, value) => {
     res.writeHead(status, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify(value))
   }
+  if (needsKey && !keyed(req)) return reply(403, { error: 'forbidden' })
   if (!route) return reply(404, { error: 'not found' })
   try {
     let raw = ''
@@ -234,13 +245,21 @@ const httpServer = createServer(async (req, res) => {
   } catch (error) {
     reply(500, { error: String(error.message ?? error) })
   }
-})
+}
+const httpServer = createServer(handle(false))
 
 // A named pipe goes away with its process; a socket file stays behind.
 if (!WINDOWS) rmSync(socketPath, { force: true })
-httpServer.listen(socketPath, () => {
+// Windows: the plugin may not reach a named pipe, so a keyed localhost port too.
+const portServer = WINDOWS ? createServer(handle(true)) : undefined
+const listening = Promise.all([
+  new Promise(resolve => httpServer.listen(socketPath, resolve)),
+  portServer && new Promise(resolve => portServer.listen(0, '127.0.0.1', resolve)),
+])
+listening.then(() => {
   if (!WINDOWS) chmodSync(socketPath, 0o600)
-  emit({ type: 'ready', device: publicDevice(), socket: socketPath })
+  const port = portServer?.address().port
+  emit({ type: 'ready', device: publicDevice(), socket: socketPath, ...(port ? { url: `http://127.0.0.1:${port}`, key: portKey } : {}) })
 })
 const cleanup = () => {
   if (!WINDOWS) rmSync(socketPath, { force: true })

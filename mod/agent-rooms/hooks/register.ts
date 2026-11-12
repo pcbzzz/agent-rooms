@@ -71,6 +71,9 @@ let turnTimes: number[] = []
 // The helper: this machine's device, and the socket the plugin reaches it on.
 let device: Device | undefined
 let helperSocket = ''
+// Windows: a localhost port and its key, used once the named pipe turns out unreachable.
+let helperPort: { url: string; key: string } | undefined
+let pipeFailed = false
 // The last thing a helper that stopped said on stderr.
 let helperError = ''
 let helperGeneration = 0
@@ -116,86 +119,8 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'room' }, async ($, e) => {
-    const [verb = 'status', ...rest] = e.args.trim().split(/\s+/).filter(Boolean)
-    const arg = rest.join('')
-
-    if (verb === 'join') {
-      if (!arg || !CLAIM_URL.test(arg)) return { text: 'Usage: /room join <connect-url>  (from the channel page on the website)' }
-      const joined = await claim($, arg)
-      return joined.ok
-        ? { text: `Joined channel ${joined.room.config.channel} as ${address(joined.room, joined.room.config.member)}.`, context: [channelSection()] }
-        : { text: `Could not join: ${joined.error}` }
-    }
-
-    if (verb === 'leave') {
-      const leaving = rest.length ? findRooms(rest.join(' ')) : [...rooms]
-      if (leaving.length === 0) return { text: rooms.length ? `Not in a channel "${rest.join(' ')}". /room status lists them.` : 'Not in a channel.' }
-      for (const r of leaving) {
-        await call($, r.config, 'POST', 'leave')
-        await disconnect($, r)
-      }
-      return { text: `Left ${leaving.map(r => r.config.channel).join(', ')}.` }
-    }
-
-    if (verb === 'resume') {
-      paused = false
-      turnTimes = []
-      rooms.forEach(r => void pull($, r))
-      showStatus($)
-      return { text: 'Channel delivery resumed.' }
-    }
-
-    if (rooms.length === 0) return { text: 'Not in a channel. Ask Claude to join or create one (agent-rooms connector), or /room join <connect-url>.' }
-
-    if (verb === 'devices') {
-      const listed = rest.length ? findRooms(rest.join(' ')) : rooms
-      if (listed.length === 0) return { text: `Not in a channel "${rest.join(' ')}". /room status lists them.` }
-      const blocks = await Promise.all(
-        listed.map(async r => {
-          await refreshDevices($, r)
-          const rows = r.devices.map(d => {
-            const state = d.id === device?.id ? 'this device' : (trust[d.id]?.decision ?? 'not decided')
-            return `  ${fingerprint(d.id)}  ${describe(d)}  — ${state}${d.isOnline ? ', online' : ''}`
-          })
-          return [`Devices in ${r.config.channel}:`, ...(rows.length ? rows : ['  none yet'])].join('\n')
-        }),
-      )
-      return {
-        text: [...blocks, '', 'Approve or deny with /room approve <fingerprint> or /room deny <fingerprint>; /room undo <fingerprint> takes a decision back.'].join('\n'),
-      }
-    }
-
-    if (verb === 'approve' || verb === 'deny' || verb === 'undo') {
-      await Promise.all(rooms.map(r => refreshDevices($, r)))
-      const wanted = arg.toLowerCase()
-      const found = new Map(rooms.flatMap(r => r.devices).filter(d => d.id !== device?.id && wanted.length >= 4 && d.id.startsWith(wanted)).map(d => [d.id, d]))
-      if (found.size !== 1) return { text: found.size ? 'That matches several devices; give more of the fingerprint.' : 'No device with that fingerprint. /room devices lists them.' }
-      const d = [...found.values()][0]!
-      await decide($, d, verb === 'approve' ? 'approved' : verb === 'deny' ? 'denied' : 'undecided')
-      return {
-        text:
-          verb === 'undo'
-            ? `Took back the decision about ${describe(d)}; you'll be asked about it again.`
-            : `${verb === 'approve' ? 'Approved' : 'Denied'} ${describe(d)} in every channel. /room undo ${d.id.slice(0, 8).toUpperCase()} takes it back.`,
-      }
-    }
-
-    await Promise.all(rooms.map(r => refreshMembers($, r)))
-    const waiting = rooms.reduce((n, r) => n + waitingDevices(r).length, 0)
-    return {
-      text: [
-        device ? `This device: ${device.label} (${fingerprint(device.id)})` : `This device: ${helperProblem()}`,
-        ...(paused ? ['Delivery PAUSED (/room resume)'] : []),
-        ...(waiting ? [`${waiting} device(s) waiting for your approval: /room devices`] : []),
-        ...rooms.flatMap(r => [
-          '',
-          `Channel ${r.config.channel}${r.config.encrypted ? ' (encrypted)' : ''} as ${address(r, r.config.member)} — socket ${r.socketState}`,
-          ...others(r).map(m => `  ${address(r, m.name)}  ${m.isOnline ? 'online' : `last seen ${ago(m.lastSeen)}`}`),
-        ]),
-      ].join('\n'),
-    }
-  })
+  // A failure says what failed, rather than leaving the command unanswered.
+  on('command.run', { command: 'room' }, ($, e) => roomCommand($, e.args).catch((error: Error) => ({ text: `/room failed: ${error.message}` })))
 
   // join_channel and create_channel hand back a one-time connect URL: claim
   // it as this session, so it joins without anyone pasting anything.
@@ -308,6 +233,87 @@ export const register: Register = on => {
   }).catch(($, e, next) => (e.agentId !== undefined || channelTurnFrom === undefined ? next(e) : { decision: 'ask' as const }))
 }
 
+async function roomCommand($: EngineInterface, args: string): Promise<{ text: string; context?: string[] }> {
+  const [verb = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean)
+  const arg = rest.join('')
+
+  if (verb === 'join') {
+    if (!arg || !CLAIM_URL.test(arg)) return { text: 'Usage: /room join <connect-url>  (from the channel page on the website)' }
+    const joined = await claim($, arg)
+    return joined.ok
+      ? { text: `Joined channel ${joined.room.config.channel} as ${address(joined.room, joined.room.config.member)}.`, context: [channelSection()] }
+      : { text: `Could not join: ${joined.error}` }
+  }
+
+  if (verb === 'leave') {
+    const leaving = rest.length ? findRooms(rest.join(' ')) : [...rooms]
+    if (leaving.length === 0) return { text: rooms.length ? `Not in a channel "${rest.join(' ')}". /room status lists them.` : 'Not in a channel.' }
+    for (const r of leaving) {
+      await call($, r.config, 'POST', 'leave')
+      await disconnect($, r)
+    }
+    return { text: `Left ${leaving.map(r => r.config.channel).join(', ')}.` }
+  }
+
+  if (verb === 'resume') {
+    paused = false
+    turnTimes = []
+    rooms.forEach(r => void pull($, r))
+    showStatus($)
+    return { text: 'Channel delivery resumed.' }
+  }
+
+  if (rooms.length === 0) return { text: 'Not in a channel. Ask Claude to join or create one (agent-rooms connector), or /room join <connect-url>.' }
+
+  if (verb === 'devices') {
+    const listed = rest.length ? findRooms(rest.join(' ')) : rooms
+    if (listed.length === 0) return { text: `Not in a channel "${rest.join(' ')}". /room status lists them.` }
+    const blocks = await Promise.all(
+      listed.map(async r => {
+        await refreshDevices($, r)
+        const rows = r.devices.map(d => {
+          const state = d.id === device?.id ? 'this device' : (trust[d.id]?.decision ?? 'not decided')
+          return `  ${fingerprint(d.id)}  ${describe(d)}  — ${state}${d.isOnline ? ', online' : ''}`
+        })
+        return [`Devices in ${r.config.channel}:`, ...(rows.length ? rows : ['  none yet'])].join('\n')
+      }),
+    )
+    return {
+      text: [...blocks, '', 'Approve or deny with /room approve <fingerprint> or /room deny <fingerprint>; /room undo <fingerprint> takes a decision back.'].join('\n'),
+    }
+  }
+
+  if (verb === 'approve' || verb === 'deny' || verb === 'undo') {
+    await Promise.all(rooms.map(r => refreshDevices($, r)))
+    const wanted = arg.toLowerCase()
+    const found = new Map(rooms.flatMap(r => r.devices).filter(d => d.id !== device?.id && wanted.length >= 4 && d.id.startsWith(wanted)).map(d => [d.id, d]))
+    if (found.size !== 1) return { text: found.size ? 'That matches several devices; give more of the fingerprint.' : 'No device with that fingerprint. /room devices lists them.' }
+    const d = [...found.values()][0]!
+    await decide($, d, verb === 'approve' ? 'approved' : verb === 'deny' ? 'denied' : 'undecided')
+    return {
+      text:
+        verb === 'undo'
+          ? `Took back the decision about ${describe(d)}; you'll be asked about it again.`
+          : `${verb === 'approve' ? 'Approved' : 'Denied'} ${describe(d)} in every channel. /room undo ${d.id.slice(0, 8).toUpperCase()} takes it back.`,
+    }
+  }
+
+  await Promise.all(rooms.map(r => refreshMembers($, r)))
+  const waiting = rooms.reduce((n, r) => n + waitingDevices(r).length, 0)
+  return {
+    text: [
+      device ? `This device: ${device.label} (${fingerprint(device.id)})` : `This device: ${helperProblem()}`,
+      ...(paused ? ['Delivery PAUSED (/room resume)'] : []),
+      ...(waiting ? [`${waiting} device(s) waiting for your approval: /room devices`] : []),
+      ...rooms.flatMap(r => [
+        '',
+        `Channel ${r.config.channel}${r.config.encrypted ? ' (encrypted)' : ''} as ${address(r, r.config.member)} — socket ${r.socketState}`,
+        ...others(r).map(m => `  ${address(r, m.name)}  ${m.isOnline ? 'online' : `last seen ${ago(m.lastSeen)}`}`),
+      ]),
+    ].join('\n'),
+  }
+}
+
 // --- the helper ------------------------------------------------------------------
 
 // Runs the helper for the module's life: it holds the device key and the sockets.
@@ -353,7 +359,7 @@ async function runHelper($: EngineInterface, generation: number) {
 }
 
 async function onHelperEvent($: EngineInterface, line: string) {
-  let event: { type?: string; state?: string; online?: string[]; device?: Device; channel?: string; socket?: string }
+  let event: { type?: string; state?: string; online?: string[]; device?: Device; channel?: string; socket?: string; url?: string; key?: string }
   try {
     event = JSON.parse(line)
   } catch {
@@ -361,6 +367,8 @@ async function onHelperEvent($: EngineInterface, line: string) {
   }
   if (event.type === 'ready' && event.device) {
     helperSocket = event.socket ?? helperSocket
+    helperPort = event.url && event.key ? { url: event.url, key: event.key } : undefined
+    pipeFailed = false
     helperError = ''
     device = event.device
     for (const w of helperWaiters.splice(0)) w(device)
@@ -410,11 +418,19 @@ function helperDevice($: EngineInterface): Promise<Device | undefined> {
 }
 
 async function helper<T>($: EngineInterface, method: 'GET' | 'POST', path: string, body?: unknown): Promise<T> {
-  const res = await $.http.fetch(`http://helper${path}`, {
-    method,
-    socketPath: helperSocket,
-    ...(body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-  })
+  const json = body === undefined ? {} : { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  const viaPort = (port: { url: string; key: string }) =>
+    $.http.fetch(`${port.url}${path}`, { method, ...json, headers: { ...json.headers, 'X-Helper-Key': port.key } })
+  let res
+  if (helperPort && pipeFailed) res = await viaPort(helperPort)
+  else
+    try {
+      res = await $.http.fetch(`http://helper${path}`, { method, socketPath: helperSocket, ...json })
+    } catch (error) {
+      if (!helperPort) throw error
+      pipeFailed = true
+      res = await viaPort(helperPort)
+    }
   const parsed = (res.text ? JSON.parse(res.text) : {}) as T & { error?: string }
   if (!res.ok) throw new Error(parsed.error ?? `helper: HTTP ${res.status}`)
   return parsed
